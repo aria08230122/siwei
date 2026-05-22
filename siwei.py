@@ -590,6 +590,51 @@ def repl(mw: Middleware, stream: bool, show_debug: bool) -> None:
             print(f"\033[31m[错误] {e}\033[0m", file=sys.stderr)
 
 
+def check_connection(mw: Middleware) -> int:
+    """自检 OB MCP 与 Claude API 连通性，返回退出码。"""
+    ok = "\033[32m✓\033[0m"
+    bad = "\033[31m✗\033[0m"
+    failures = 0
+
+    print(f"人格: {ok} {mw.persona.name}")
+
+    mcp = mw.mcp
+    if not mcp.enabled:
+        print(f"OB MCP: \033[2m已禁用 (mcp.enabled=false)\033[0m")
+    elif not mcp.base_url:
+        print(f"OB MCP: {bad} 未配置 base_url")
+        failures += 1
+    else:
+        print(f"OB MCP: 连接 {mcp.base_url} ...")
+        try:
+            mcp.initialize()
+            print(f"  initialize {ok}" + (f" (session={mcp.session_id})" if mcp.session_id else ""))
+            mem = mcp.fetch_memory("自检测试")
+            preview = mem.replace("\n", " ")[:80] if mem else "(空，但调用成功)"
+            print(f"  {mcp.memory_tool} 拉记忆 {ok} -> {preview}")
+            if mcp.write_enabled:
+                print(f"  写回模式: {mcp.write_tool} (enabled)")
+        except Exception as e:  # noqa: BLE001
+            print(f"  {bad} {e}")
+            failures += 1
+
+    claude = mw.claude
+    print(f"Claude API: 连接 {claude._endpoint()} ...")
+    try:
+        reply = claude.chat([{"role": "user", "content": "ping，请只回复 pong"}])
+        print(f"  {ok} 模型 {claude.model} 响应: {reply.strip()[:60]}")
+    except Exception as e:  # noqa: BLE001
+        print(f"  {bad} {e}")
+        failures += 1
+
+    print()
+    if failures:
+        print(f"\033[31m自检发现 {failures} 项问题，请检查 config.yaml。\033[0m")
+        return 1
+    print("\033[32m全部连通，可以开聊。\033[0m")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="siwei 本地中间层")
     parser.add_argument("-c", "--config", default="config.yaml", help="配置文件路径")
@@ -600,6 +645,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-cot", action="store_true", help="禁用本地思维链")
     parser.add_argument("--stream", action="store_true", help="流式输出")
     parser.add_argument("--debug", action="store_true", help="打印记忆与思维链")
+    parser.add_argument("--check", action="store_true",
+                        help="自检: 测试 OB MCP 与 Claude API 连通性后退出")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
@@ -613,6 +660,9 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("cot", {})["enabled"] = False
 
     mw = Middleware(config)
+
+    if args.check:
+        return check_connection(mw)
 
     if args.message:
         try:
