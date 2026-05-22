@@ -448,6 +448,23 @@ class ClaudeClient:
             return f"{self.base_url}/chat/completions"
         return f"{self.base_url}/v1/chat/completions"
 
+    def request_raw(self, messages: list[dict], stream: bool = False,
+                    base_payload: dict | None = None) -> requests.Response:
+        """转发到真正的 Claude API，返回原始 Response 以便原样透传给客户端。"""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = dict(base_payload or {})
+        payload["model"] = self.model           # 始终用本地配置的真实模型
+        payload["messages"] = messages
+        payload["stream"] = stream
+        payload.setdefault("max_tokens", self.max_tokens)
+        return requests.post(
+            self._endpoint(), headers=headers, json=payload,
+            timeout=self.timeout, stream=stream,
+        )
+
     def chat(self, messages: list[dict], stream: bool = False) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -498,6 +515,26 @@ class ClaudeClient:
 # --------------------------------------------------------------------------- #
 # 中间层编排
 # --------------------------------------------------------------------------- #
+def _content_text(content: Any) -> str:
+    """从 OpenAI 消息 content 中提取纯文本 (兼容字符串或多模态数组)。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            item.get("text", "") for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        return " ".join(p for p in parts if p)
+    return ""
+
+
+def _last_user_text(messages: list[dict]) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return _content_text(m.get("content", ""))
+    return ""
+
+
 class Middleware:
     def __init__(self, config: dict):
         self.config = config
@@ -536,6 +573,36 @@ class Middleware:
 
         debug = {"memory": memory, "cot": cot, "system": system_prompt}
         return messages, debug
+
+    def build_server_messages(
+        self, messages: list[dict]
+    ) -> tuple[list[dict], str, str, str]:
+        """API 服务模式: 用客户端传来的对话历史构造增强后的消息。
+
+        返回 (重组消息, 末条用户文本, 记忆, 思维链)。
+        """
+        user_text = _last_user_text(messages)
+        memory = self.mcp.fetch_memory(user_text) if user_text else ""
+        cot = self.rule_engine.reason(user_text, memory) if user_text else ""
+
+        system_parts = [self.persona.build_system_prompt()]
+        if memory:
+            system_parts.append(f"\n[相关记忆]\n{memory}")
+        if cot:
+            system_parts.append(
+                f"\n请在内部参考以下本地推理脉络来组织回答(不要原样复述):\n{cot}"
+            )
+        client_sys = [
+            _content_text(m.get("content", "")) for m in messages
+            if m.get("role") == "system" and m.get("content")
+        ]
+        if any(client_sys):
+            system_parts.append("\n[客户端附加指令]\n" + "\n".join(c for c in client_sys if c))
+
+        system_prompt = "\n".join(p for p in system_parts if p).strip()
+        rebuilt: list[dict] = [{"role": "system", "content": system_prompt}]
+        rebuilt.extend(m for m in messages if m.get("role") != "system")
+        return rebuilt, user_text, memory, cot
 
     def respond(self, user_input: str, stream: bool = False,
                 show_debug: bool = False) -> str:
@@ -589,6 +656,106 @@ def repl(mw: Middleware, stream: bool, show_debug: bool) -> None:
                 print(f"\033[36m助手 >\033[0m {reply}\n")
         except Exception as e:  # noqa: BLE001
             print(f"\033[31m[错误] {e}\033[0m", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# API 服务模式 (OpenAI 兼容)
+# --------------------------------------------------------------------------- #
+def _parse_stream_content(text: str) -> str:
+    """从完整的 OpenAI SSE 流文本里拼出 assistant 内容 (用于写回记忆)。"""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        delta = (chunk.get("choices") or [{}])[0].get("delta", {})
+        piece = delta.get("content")
+        if piece:
+            out.append(piece)
+    return "".join(out)
+
+
+def _server_writeback(mw: Middleware, user_text: str, reply: str) -> None:
+    if mw.mcp.write_enabled and user_text and reply:
+        mw.mcp.write_memory(f"用户: {user_text}\n{mw.persona.name}: {reply}")
+
+
+def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int:
+    """以 OpenAI 兼容的 API 服务模式运行，监听 /v1/chat/completions。"""
+    try:
+        from flask import Flask, Response, jsonify, request, stream_with_context
+    except ImportError:
+        sys.exit("API 服务模式需要 Flask，请运行: pip install flask")
+
+    app = Flask(__name__)
+
+    @app.post("/v1/chat/completions")
+    def chat_completions():
+        body = request.get_json(force=True, silent=True) or {}
+        messages = body.get("messages", []) or []
+        stream = bool(body.get("stream", False))
+        rebuilt, user_text, memory, cot = mw.build_server_messages(messages)
+        if show_debug:
+            print(f"[serve] user={user_text[:40]!r} mem={'Y' if memory else 'N'} "
+                  f"cot={'Y' if cot else 'N'} stream={stream}", file=sys.stderr)
+        try:
+            upstream = mw.claude.request_raw(rebuilt, stream=stream, base_payload=body)
+        except requests.RequestException as e:
+            return jsonify({"error": {"message": f"上游 Claude API 请求失败: {e}",
+                                       "type": "upstream_error"}}), 502
+
+        ctype = upstream.headers.get("Content-Type", "application/json")
+
+        if not stream:
+            content = upstream.content
+            try:
+                reply = upstream.json()["choices"][0]["message"]["content"]
+                _server_writeback(mw, user_text, reply)
+            except Exception:  # noqa: BLE001 - 写回失败不应影响透传
+                pass
+            return Response(content, status=upstream.status_code, content_type=ctype)
+
+        def generate():
+            buf: list[bytes] = []
+            for chunk in upstream.iter_content(chunk_size=None):
+                if chunk:
+                    buf.append(chunk)
+                    yield chunk          # 原样透传给客户端
+            try:
+                full = b"".join(buf).decode("utf-8", "ignore")
+                _server_writeback(mw, user_text, _parse_stream_content(full))
+            except Exception:  # noqa: BLE001
+                pass
+
+        resp = Response(stream_with_context(generate()), content_type="text/event-stream")
+        resp.headers["Cache-Control"] = "no-cache"
+        resp.headers["X-Accel-Buffering"] = "no"
+        return resp
+
+    @app.get("/v1/models")
+    def models():
+        return jsonify({"object": "list", "data": [
+            {"id": "siwei", "object": "model", "owned_by": "siwei"},
+        ]})
+
+    @app.get("/health")
+    def health():
+        return jsonify({"status": "ok", "persona": mw.persona.name})
+
+    print(f"siwei API 服务已启动 -> http://{host}:{port}/v1/chat/completions")
+    print(f"  人格={mw.persona.name}  上游模型={mw.claude.model}  "
+          f"记忆={'on' if mw.mcp.enabled else 'off'}  "
+          f"写回={'on' if mw.mcp.write_enabled else 'off'}")
+    print(f"  把客户端(如 Operit)的 API 地址指向 http://<本机IP>:{port}/v1 即可。")
+    app.run(host=host, port=port, threaded=True)
+    return 0
 
 
 def check_connection(mw: Middleware) -> int:
@@ -648,6 +815,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--debug", action="store_true", help="打印记忆与思维链")
     parser.add_argument("--check", action="store_true",
                         help="自检: 测试 OB MCP 与 Claude API 连通性后退出")
+    parser.add_argument("--serve", action="store_true",
+                        help="以 OpenAI 兼容 API 服务模式运行 (/v1/chat/completions)")
+    parser.add_argument("--host", default="0.0.0.0", help="服务监听地址 (默认 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=5001, help="服务监听端口 (默认 5001)")
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
@@ -664,6 +835,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         return check_connection(mw)
+
+    if args.serve:
+        return serve(mw, args.host, args.port, show_debug=args.debug)
 
     if args.message:
         try:
