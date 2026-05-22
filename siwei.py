@@ -210,12 +210,20 @@ class MCPClient:
         self.enabled = bool(cfg.get("enabled", False))
         self.base_url = (cfg.get("base_url") or "").rstrip("/")
         self.token = cfg.get("token") or ""
-        self.memory_tool = cfg.get("memory_tool", "search_memory")
+        self.memory_tool = cfg.get("memory_tool", "breath")
         self.memory_args = cfg.get("memory_args", {}) or {}
         self.query_field = cfg.get("query_field", "query")
         self.timeout = cfg.get("timeout", 30)
         self.session_id: str | None = None
         self._initialized = False
+
+        # 回合结束写回记忆 (grow=日记归档 / hold=单条记忆)
+        wb = cfg.get("write_back", {}) or {}
+        self.write_enabled = bool(wb.get("enabled", False))
+        self.write_tool = wb.get("tool", "grow")
+        self.write_min_chars = wb.get("min_chars", 10)
+        self.write_tags = wb.get("tags", "")
+        self.write_importance = wb.get("importance")
 
     def _headers(self) -> dict:
         h = {
@@ -332,6 +340,38 @@ class MCPClient:
         except Exception as e:  # noqa: BLE001 - 记忆是可选增强，失败不应中断主流程
             print(f"[MCP] 拉取记忆失败: {e}", file=sys.stderr)
             return ""
+
+    def write_memory(self, content: str) -> bool:
+        """把一段内容写回 OB (grow 日记 / hold 单条记忆)。失败时返回 False。"""
+        if not (self.enabled and self.write_enabled and self.base_url):
+            return False
+        if len(content.strip()) < self.write_min_chars:
+            return False
+        try:
+            self.initialize()
+            args: dict[str, Any] = {"content": content}
+            if self.write_tool == "hold":
+                if self.write_tags:
+                    args["tags"] = self.write_tags
+                if self.write_importance is not None:
+                    args["importance"] = self.write_importance
+            payload = {
+                "jsonrpc": "2.0",
+                "id": str(uuid.uuid4()),
+                "method": "tools/call",
+                "params": {"name": self.write_tool, "arguments": args},
+            }
+            resp = self._post(payload)
+            if resp and "error" in resp:
+                print(f"[MCP] 写回记忆失败: {resp['error']}", file=sys.stderr)
+                return False
+            return True
+        except requests.RequestException as e:
+            print(f"[MCP] 写回记忆失败 (网络): {e}", file=sys.stderr)
+            return False
+        except Exception as e:  # noqa: BLE001 - 写回是可选增强，失败不应中断主流程
+            print(f"[MCP] 写回记忆失败: {e}", file=sys.stderr)
+            return False
 
     @classmethod
     def _extract_text(cls, result: Any) -> str:
@@ -507,6 +547,11 @@ class Middleware:
         reply = self.claude.chat(messages, stream=stream)
         self.history.append({"role": "user", "content": user_input})
         self.history.append({"role": "assistant", "content": reply})
+        if self.mcp.write_enabled:
+            saved = self.mcp.write_memory(f"用户: {user_input}\n{self.persona.name}: {reply}")
+            if show_debug and saved:
+                print(f"\033[2m[已写回记忆 -> {self.mcp.write_tool}]\033[0m",
+                      file=sys.stderr)
         return reply
 
 
@@ -551,6 +596,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-p", "--persona", help="覆盖默认人格名")
     parser.add_argument("-m", "--message", help="单次提问模式 (不进入交互)")
     parser.add_argument("--no-mcp", action="store_true", help="禁用记忆拉取")
+    parser.add_argument("--no-write", action="store_true", help="禁用记忆写回")
     parser.add_argument("--no-cot", action="store_true", help="禁用本地思维链")
     parser.add_argument("--stream", action="store_true", help="流式输出")
     parser.add_argument("--debug", action="store_true", help="打印记忆与思维链")
@@ -561,6 +607,8 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("persona", {})["default"] = args.persona
     if args.no_mcp:
         config.setdefault("mcp", {})["enabled"] = False
+    if args.no_write:
+        config.setdefault("mcp", {}).setdefault("write_back", {})["enabled"] = False
     if args.no_cot:
         config.setdefault("cot", {})["enabled"] = False
 

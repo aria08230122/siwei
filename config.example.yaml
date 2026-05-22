@@ -23,6 +23,14 @@ mcp:
     max_tokens: 1500
     # importance_min: 3               # >=1 时改为按重要度拉取, 不走语义搜索
   timeout: 30
+  # 回合结束自动把对话写回 OB, 形成长期记忆闭环
+  write_back:
+    enabled: true
+    tool: grow                        # grow=日记归档(自动拆桶) / hold=单条记忆
+    min_chars: 10                     # 内容太短不写
+    # 下面两项仅 tool: hold 时生效
+    tags: "对话,siwei"
+    importance: 5
 
 # ---- 人格模板 ----
 persona:
