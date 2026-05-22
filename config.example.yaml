@@ -4,7 +4,7 @@
 claude:
   base_url: ${CLAUDE_BASE_URL:-https://your-third-party-site/v1}
   api_key: ${CLAUDE_API_KEY}          # 建议放环境变量，不要写死在文件里
-  model: claude-3-5-sonnet
+  model: ${CLAUDE_MODEL:-claude-3-5-sonnet}   # 也可用环境变量 CLAUDE_MODEL 覆盖
   max_tokens: 2048
   temperature: 0.7
   timeout: 120

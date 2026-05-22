@@ -430,7 +430,8 @@ class ClaudeClient:
     def __init__(self, cfg: dict):
         self.base_url = (cfg.get("base_url") or "").rstrip("/")
         self.api_key = cfg.get("api_key") or ""
-        self.model = cfg.get("model", "claude-3-5-sonnet")
+        # 环境变量 CLAUDE_MODEL 优先于配置文件 (便于含特殊字符的模型名)
+        self.model = os.environ.get("CLAUDE_MODEL") or cfg.get("model", "claude-3-5-sonnet")
         self.max_tokens = cfg.get("max_tokens", 2048)
         self.temperature = cfg.get("temperature", 0.7)
         self.timeout = cfg.get("timeout", 120)
