@@ -333,26 +333,54 @@ class MCPClient:
             print(f"[MCP] 拉取记忆失败: {e}", file=sys.stderr)
             return ""
 
-    @staticmethod
-    def _extract_text(result: Any) -> str:
-        """从 MCP tools/call 结果里提取纯文本。"""
+    @classmethod
+    def _extract_text(cls, result: Any) -> str:
+        """从 MCP tools/call 结果里提取纯文本。
+
+        兼容标准 MCP content 数组，也兼容 Ombre Brian 的 {"result": ...} 外壳。
+        """
         if result is None:
             return ""
         if isinstance(result, str):
-            return result
-        content = result.get("content") if isinstance(result, dict) else None
-        if isinstance(content, list):
-            chunks = []
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "text" and item.get("text"):
-                        chunks.append(item["text"])
-                    elif "text" in item:
-                        chunks.append(str(item["text"]))
-                else:
-                    chunks.append(str(item))
-            return "\n".join(chunks).strip()
+            return cls._unwrap(result)
+        if isinstance(result, list):
+            return "\n".join(cls._extract_text(x) for x in result).strip()
+        if isinstance(result, dict):
+            content = result.get("content")
+            if isinstance(content, list):
+                chunks = []
+                for item in content:
+                    if isinstance(item, dict):
+                        if "text" in item:
+                            chunks.append(str(item["text"]))
+                    else:
+                        chunks.append(str(item))
+                return cls._unwrap("\n".join(chunks).strip())
+            # 非标准: result 本身带 result/memories/text 字段
+            for key in ("result", "memories", "text"):
+                if key in result:
+                    return cls._unwrap(result[key])
         return json.dumps(result, ensure_ascii=False)
+
+    @classmethod
+    def _unwrap(cls, text: Any) -> str:
+        """若文本是 {"result": ...} 之类的 JSON 串，剥掉外壳取内部文本。"""
+        if not isinstance(text, str):
+            return cls._extract_text(text)
+        s = text.strip()
+        if s.startswith("{") or s.startswith("["):
+            try:
+                parsed = json.loads(s)
+            except json.JSONDecodeError:
+                return s
+            if isinstance(parsed, dict):
+                for key in ("result", "memories", "text", "content"):
+                    if key in parsed:
+                        return cls._extract_text(parsed[key])
+            elif isinstance(parsed, list):
+                return "\n".join(cls._extract_text(x) for x in parsed)
+            return s
+        return s
 
 
 # --------------------------------------------------------------------------- #

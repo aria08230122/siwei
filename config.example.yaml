@@ -9,15 +9,19 @@ claude:
   temperature: 0.7
   timeout: 120
 
-# ---- OB 的 MCP 接口 (HTTP / SSE, JSON-RPC streamable-http) ----
+# ---- OB (Ombre Brian) 的 MCP 接口 (HTTP / SSE, JSON-RPC streamable-http) ----
+# Ombre Brian 暴露的工具: breath(检索/浮现记忆) dream(读新桶) grow(写日记)
+#   hold(存记忆) pulse(看状态) trace(改元数据)。拉记忆用 breath。
 mcp:
   enabled: true
-  base_url: ${OB_MCP_URL:-https://your-ob-host/mcp}
-  token: ${OB_MCP_TOKEN}              # 作为 Authorization: Bearer 发送
-  memory_tool: search_memory          # OB 暴露的记忆检索工具名
-  query_field: query                  # 把用户输入填到这个参数字段
-  memory_args:                         # 传给工具的固定参数
-    limit: 5
+  base_url: ${OB_MCP_URL:-http://127.0.0.1:8000/mcp}  # 填你 Ombre Brian 的 HTTP 端点
+  token: ${OB_MCP_TOKEN}              # 作为 Authorization: Bearer 发送 (没有就留空)
+  memory_tool: breath                 # 记忆检索/浮现工具
+  query_field: query                  # 用户输入填到 query 字段; 留空则自动浮现
+  memory_args:                        # 传给 breath 的固定参数
+    max_results: 5
+    max_tokens: 1500
+    # importance_min: 3               # >=1 时改为按重要度拉取, 不走语义搜索
   timeout: 30
 
 # ---- 人格模板 ----
