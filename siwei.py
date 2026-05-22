@@ -160,8 +160,9 @@ _DEFAULT_RULES: list[dict] = [
         "name": "memory_recall",
         "pattern": r"(还记得|之前|上次|刚才|昨天|我们聊过|那个)",
         "thoughts": [
-            "用户在引用过去的对话，优先依赖拉取到的记忆。",
-            "若记忆中没有相关内容，坦诚说明而不是编造。",
+            "用户在引用过去的对话，优先依赖你内部记忆里的内容。",
+            "用户在聊天界面看不到注入的记忆原文，不要说\"你看到的那个\"或让用户去查看。",
+            "若记忆中没有相关内容，坦诚说不记得而不是编造。",
         ],
     },
 ]
@@ -553,19 +554,45 @@ class Middleware:
         self.history: list[dict] = []
         self.max_history = config.get("max_history", 10)
 
+    def _assemble_system(self, memory: str, cot: str,
+                         client_systems: list[str] | None = None) -> str:
+        """把人格、记忆、思维链、客户端系统消息拼成最终的 system prompt。
+
+        关键: 给记忆块和思维链块加上明确的"仅模型可见"框架，
+        避免模型把注入的记忆误以为是用户能看到的附件/文件。
+        """
+        parts: list[str] = [self.persona.build_system_prompt()]
+        if memory:
+            parts.append(
+                "\n[内部记忆库 — 仅你(模型)可见，用户在聊天界面看不到这一段]\n"
+                "下面是你自己长期记得的内容(来自你的私有记忆库，不是用户发来的附件、"
+                "文件或上传内容)。把它当成你自己脑子里的记忆，自然引用即可。\n"
+                "切勿:① 说\"我看到你发的xx\" \"附件里写着xx\" \"你刚才上传的xx\"; "
+                "② 让用户去某个地方查看 —— 用户那边什么都没有; "
+                "③ 编造看起来像文件名/附件名的字符串 (例如 OB_Memory_xxx)。\n"
+                "如果记忆里没有相关内容，就直接说不记得，不要编。\n"
+                "--- 记忆开始 ---\n"
+                f"{memory}\n"
+                "--- 记忆结束 ---"
+            )
+        if cot:
+            parts.append(
+                "\n[内部思考脉络 — 仅你(模型)可见]\n"
+                "按以下思路在内部组织回答，但不要把这些步骤念出来，"
+                "也不要在回答里讨论\"思维链\"或这段提示本身:\n"
+                f"{cot}"
+            )
+        if client_systems:
+            joined = "\n".join(c for c in client_systems if c)
+            if joined:
+                parts.append(f"\n[客户端附加指令]\n{joined}")
+        return "\n".join(p for p in parts if p).strip()
+
     def build_messages(self, user_input: str) -> tuple[list[dict], dict]:
         """构造发往 Claude 的消息，并返回调试信息。"""
         memory = self.mcp.fetch_memory(user_input)
         cot = self.rule_engine.reason(user_input, memory)
-
-        system_parts = [self.persona.build_system_prompt()]
-        if memory:
-            system_parts.append(f"\n[相关记忆]\n{memory}")
-        if cot:
-            system_parts.append(
-                f"\n请在内部参考以下本地推理脉络来组织回答(不要原样复述):\n{cot}"
-            )
-        system_prompt = "\n".join(p for p in system_parts if p).strip()
+        system_prompt = self._assemble_system(memory, cot)
 
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(self.history[-self.max_history * 2:])
@@ -585,21 +612,11 @@ class Middleware:
         memory = self.mcp.fetch_memory(user_text) if user_text else ""
         cot = self.rule_engine.reason(user_text, memory) if user_text else ""
 
-        system_parts = [self.persona.build_system_prompt()]
-        if memory:
-            system_parts.append(f"\n[相关记忆]\n{memory}")
-        if cot:
-            system_parts.append(
-                f"\n请在内部参考以下本地推理脉络来组织回答(不要原样复述):\n{cot}"
-            )
-        client_sys = [
+        client_systems = [
             _content_text(m.get("content", "")) for m in messages
             if m.get("role") == "system" and m.get("content")
         ]
-        if any(client_sys):
-            system_parts.append("\n[客户端附加指令]\n" + "\n".join(c for c in client_sys if c))
-
-        system_prompt = "\n".join(p for p in system_parts if p).strip()
+        system_prompt = self._assemble_system(memory, cot, client_systems)
         rebuilt: list[dict] = [{"role": "system", "content": system_prompt}]
         rebuilt.extend(m for m in messages if m.get("role") != "system")
         return rebuilt, user_text, memory, cot
