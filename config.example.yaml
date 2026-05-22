@@ -14,7 +14,7 @@ claude:
 #   hold(存记忆) pulse(看状态) trace(改元数据)。拉记忆用 breath。
 mcp:
   enabled: true
-  base_url: ${OB_MCP_URL:-http://127.0.0.1:8000/mcp}  # 填你 Ombre Brian 的 HTTP 端点
+  base_url: ${OB_MCP_URL:-http://10.190.98.158:8000/mcp}  # 填你 Ombre Brian 的 HTTP 端点
   token: ${OB_MCP_TOKEN}              # 作为 Authorization: Bearer 发送 (没有就留空)
   memory_tool: breath                 # 记忆检索/浮现工具
   query_field: query                  # 用户输入填到 query 字段; 留空则自动浮现
