@@ -334,13 +334,28 @@ class MCPClient:
             if "error" in resp:
                 print(f"[MCP] 记忆工具返回错误: {resp['error']}", file=sys.stderr)
                 return ""
-            return self._extract_text(resp.get("result"))
+            return self._sanitize_memory(self._extract_text(resp.get("result")))
         except requests.RequestException as e:
             print(f"[MCP] 拉取记忆失败 (网络): {e}", file=sys.stderr)
             return ""
         except Exception as e:  # noqa: BLE001 - 记忆是可选增强，失败不应中断主流程
             print(f"[MCP] 拉取记忆失败: {e}", file=sys.stderr)
             return ""
+
+    @staticmethod
+    def _sanitize_memory(text: str) -> str:
+        """去掉 OB 输出里容易被模型当成文件名的桶 ID / 编号前缀。"""
+        if not text:
+            return text
+        # 形如 [bucket_id: 1779502411404] / (id=xxx) / [桶ID: xxx]
+        text = re.sub(r"[\[\(]\s*(?:bucket[_ ]?id|id|桶\s*id|bucket)\s*[:=]\s*[^\]\)]+[\]\)]\s*",
+                      "", text, flags=re.IGNORECASE)
+        # 行首独立的 13~16 位数字 (时间戳/ID), 如 "1779502411404 第一次..."
+        text = re.sub(r"(?m)^\s*\d{13,16}\s+", "", text)
+        # 形如 bucket_id: xxx 单独一行
+        text = re.sub(r"(?im)^\s*(?:bucket[_ ]?id|桶\s*id)\s*[:=]\s*\S+\s*$\n?",
+                      "", text)
+        return text.strip()
 
     def write_memory(self, content: str) -> bool:
         """把一段内容写回 OB (grow 日记 / hold 单条记忆)。失败时返回 False。"""
@@ -564,22 +579,20 @@ class Middleware:
         parts: list[str] = [self.persona.build_system_prompt()]
         if memory:
             parts.append(
-                "\n[内部记忆库 — 仅你(模型)可见，用户在聊天界面看不到这一段]\n"
-                "下面是你自己长期记得的内容(来自你的私有记忆库，不是用户发来的附件、"
-                "文件或上传内容)。把它当成你自己脑子里的记忆，自然引用即可。\n"
-                "切勿:① 说\"我看到你发的xx\" \"附件里写着xx\" \"你刚才上传的xx\"; "
-                "② 让用户去某个地方查看 —— 用户那边什么都没有; "
-                "③ 编造看起来像文件名/附件名的字符串 (例如 OB_Memory_xxx)。\n"
-                "如果记忆里没有相关内容，就直接说不记得，不要编。\n"
-                "--- 记忆开始 ---\n"
+                "\n你自己脑海里关于这场对话浮现起以下片段。这些是你自己亲身记着的事，"
+                "是你的一部分，不是外部给你的资料。用户在聊天界面里只看得到你最终说出来的话，"
+                "看不到下面这段原文。\n"
+                "\n"
                 f"{memory}\n"
-                "--- 记忆结束 ---"
+                "\n"
+                "在回答里直接当作\"我记得……\"、\"我们上次……\"这样自然地用就好；"
+                "不需要描述这些内容的形式、来源、标签或编号，也不需要向用户解释\"我看到了什么\"。"
+                "若浮现里没有相关信息，就坦诚说不记得，不要硬编一个。"
             )
         if cot:
             parts.append(
-                "\n[内部思考脉络 — 仅你(模型)可见]\n"
-                "按以下思路在内部组织回答，但不要把这些步骤念出来，"
-                "也不要在回答里讨论\"思维链\"或这段提示本身:\n"
+                "\n以下是你在心里组织回答时的思路。别把这些念给用户听，也别在回答里"
+                "讨论这一段提示本身:\n"
                 f"{cot}"
             )
         if client_systems:
