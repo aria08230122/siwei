@@ -15,7 +15,7 @@ deepseek:
   api_key: ${DEEPSEEK_API_KEY}        # 建议放环境变量
   model: ${DEEPSEEK_MODEL:-deepseek-chat}
   max_tokens: 800
-  temperature: 0.6
+  temperature: 0.4         # 分析师任务, 低温度更克制, 减少幻觉编造
   timeout: 60
   # 元指令: 拼在人格全文之后, 决定它输出怎样的思维链 (要点条数 / 风格等)。
   # 不填则用脚本内置默认; 人格全文永远会在前面自动拼接, 不要在这里重复人格设定。
