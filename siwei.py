@@ -3,9 +3,10 @@
 siwei - 本地中间层脚本
 
 职责:
-  1. 本地规则引擎生成思维链 (CoT)，不额外调用任何 API
+  1. 调用 DeepSeek API 为用户消息生成思维链 (CoT)；
+     DeepSeek 不可用时回落到本地规则引擎，保证不中断。
   2. 通过 HTTP/SSE 对接 OB 的 MCP 接口拉取记忆
-  3. 对接第三方 Claude API 站点 (OpenAI 兼容格式)
+  3. 对接第三方 Claude API 站点 (OpenAI 兼容格式) 生成正式回复
   4. 人格模板从本地 YAML 文件加载
 
 设计目标: 仅依赖 requests + pyyaml，可在 Termux 与电脑终端直接运行。
@@ -110,7 +111,7 @@ class Persona:
 
 
 # --------------------------------------------------------------------------- #
-# 本地规则引擎: 生成思维链 (不调任何 API)
+# 本地规则引擎: 生成思维链 (DeepSeek 不可用时的兜底)
 # --------------------------------------------------------------------------- #
 @dataclass
 class Rule:
@@ -440,6 +441,94 @@ class MCPClient:
 
 
 # --------------------------------------------------------------------------- #
+# DeepSeek API 客户端 (OpenAI 兼容格式, 专门用于生成思维链)
+# --------------------------------------------------------------------------- #
+_DEFAULT_COT_SYSTEM = (
+    "你是另一个 AI 人格在回复用户前的'内心思考'模块。"
+    "你不会直接对用户说话，你的输出只会被喂给真正出面回复的模型当作思路提示。"
+    "\n\n每次你会收到:\n"
+    "  - 正在使用的人格的简介\n"
+    "  - 那个人格脑海里浮现的相关记忆 (可能为空)\n"
+    "  - 用户的最新发言\n"
+    "\n请用第一人称, 像那个人格自己在心里想一样, 输出 3-6 条简短要点, 涵盖:\n"
+    "  1. 用户这句话在表达什么 (字面 + 真实意图)\n"
+    "  2. 我此刻的判断和情绪\n"
+    "  3. 浮现的记忆里哪些值得用、哪些不用提\n"
+    "  4. 回复的语气、节奏、要避开的雷区\n"
+    "\n要求: 直接进入要点, 不要总结开场白; 中文; 不要包装, 坦诚一点;"
+    " 不要替对方写出最终回复, 只写思路。"
+)
+
+
+class DeepSeekClient:
+    """DeepSeek API 客户端，给 Claude 出面之前先生成一段思维链。"""
+
+    def __init__(self, cfg: dict):
+        self.enabled = bool(cfg.get("enabled", True))
+        self.base_url = (cfg.get("base_url") or "").rstrip("/")
+        self.api_key = cfg.get("api_key") or ""
+        self.model = os.environ.get("DEEPSEEK_MODEL") or cfg.get("model", "deepseek-chat")
+        self.max_tokens = cfg.get("max_tokens", 800)
+        self.temperature = cfg.get("temperature", 0.6)
+        self.timeout = cfg.get("timeout", 60)
+        self.system_prompt = (cfg.get("system_prompt") or _DEFAULT_COT_SYSTEM).strip()
+        if self.enabled:
+            if not self.base_url:
+                sys.exit("配置缺失: deepseek.base_url (或将 deepseek.enabled 设为 false)")
+            if not self.api_key:
+                sys.exit("配置缺失: deepseek.api_key (可用环境变量 DEEPSEEK_API_KEY)")
+
+    def _endpoint(self) -> str:
+        if self.base_url.endswith("/chat/completions"):
+            return self.base_url
+        if self.base_url.endswith("/v1"):
+            return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}/v1/chat/completions"
+
+    def think(self, user_input: str, memory: str = "", persona_hint: str = "") -> str:
+        """生成思维链文本; 失败/未启用时返回空串, 调用方自行回落。"""
+        if not self.enabled or not user_input.strip():
+            return ""
+        ctx_parts: list[str] = []
+        if persona_hint:
+            ctx_parts.append(f"[正在使用的人格简介]\n{persona_hint}")
+        if memory:
+            ctx_parts.append(f"[那个人格脑海里浮现的相关记忆]\n{memory}")
+        ctx_parts.append(f"[用户的最新发言]\n{user_input}")
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": "\n\n".join(ctx_parts)},
+        ]
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": False,
+        }
+        try:
+            resp = requests.post(
+                self._endpoint(), headers=headers, json=payload, timeout=self.timeout,
+            )
+        except requests.RequestException as e:
+            print(f"[DeepSeek] 请求失败: {e}", file=sys.stderr)
+            return ""
+        if resp.status_code >= 400:
+            print(f"[DeepSeek] {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            return ""
+        try:
+            content = resp.json()["choices"][0]["message"]["content"]
+        except (KeyError, ValueError, IndexError) as e:
+            print(f"[DeepSeek] 响应解析失败: {e}", file=sys.stderr)
+            return ""
+        return (content or "").strip()
+
+
+# --------------------------------------------------------------------------- #
 # Claude API 客户端 (第三方站, OpenAI 兼容格式)
 # --------------------------------------------------------------------------- #
 class ClaudeClient:
@@ -564,10 +653,24 @@ class Middleware:
             rules=cot_cfg.get("rules"),
             enabled=cot_cfg.get("enabled", True),
         )
+        self.deepseek = DeepSeekClient(config.get("deepseek", {}))
         self.mcp = MCPClient(config.get("mcp", {}))
         self.claude = ClaudeClient(config.get("claude", {}))
         self.history: list[dict] = []
         self.max_history = config.get("max_history", 10)
+
+    def _generate_cot(self, user_input: str, memory: str) -> str:
+        """先让 DeepSeek 出思维链; 失败或未启用时回落到本地规则引擎."""
+        if self.deepseek.enabled:
+            persona_hint = (self.persona.description
+                            or self.persona.style
+                            or self.persona.name)
+            cot = self.deepseek.think(
+                user_input, memory=memory, persona_hint=persona_hint,
+            )
+            if cot:
+                return f"[思维链 / DeepSeek]\n{cot}"
+        return self.rule_engine.reason(user_input, memory)
 
     def _assemble_system(self, memory: str, cot: str,
                          client_systems: list[str] | None = None) -> str:
@@ -604,7 +707,7 @@ class Middleware:
     def build_messages(self, user_input: str) -> tuple[list[dict], dict]:
         """构造发往 Claude 的消息，并返回调试信息。"""
         memory = self.mcp.fetch_memory(user_input)
-        cot = self.rule_engine.reason(user_input, memory)
+        cot = self._generate_cot(user_input, memory)
         system_prompt = self._assemble_system(memory, cot)
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -623,7 +726,7 @@ class Middleware:
         """
         user_text = _last_user_text(messages)
         memory = self.mcp.fetch_memory(user_text) if user_text else ""
-        cot = self.rule_engine.reason(user_text, memory) if user_text else ""
+        cot = self._generate_cot(user_text, memory) if user_text else ""
 
         client_systems = [
             _content_text(m.get("content", "")) for m in messages
@@ -816,6 +919,26 @@ def check_connection(mw: Middleware) -> int:
             print(f"  {bad} {e}")
             failures += 1
 
+    deepseek = mw.deepseek
+    if not deepseek.enabled:
+        print(f"DeepSeek: \033[2m已禁用 (deepseek.enabled=false), 将使用本地规则引擎\033[0m")
+    else:
+        print(f"DeepSeek API: 连接 {deepseek._endpoint()} ...")
+        try:
+            thought = deepseek.think(
+                "ping, 请用一两句话给我一段思考示例。",
+                persona_hint="自检",
+            )
+            if thought:
+                preview = thought.replace("\n", " ")[:80]
+                print(f"  {ok} 模型 {deepseek.model} 响应: {preview}")
+            else:
+                print(f"  {bad} 模型 {deepseek.model} 返回空 (详见上面错误)")
+                failures += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  {bad} {e}")
+            failures += 1
+
     claude = mw.claude
     print(f"Claude API: 连接 {claude._endpoint()} ...")
     try:
@@ -840,7 +963,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-m", "--message", help="单次提问模式 (不进入交互)")
     parser.add_argument("--no-mcp", action="store_true", help="禁用记忆拉取")
     parser.add_argument("--no-write", action="store_true", help="禁用记忆写回")
-    parser.add_argument("--no-cot", action="store_true", help="禁用本地思维链")
+    parser.add_argument("--no-cot", action="store_true", help="禁用本地规则引擎兜底")
+    parser.add_argument("--no-deepseek", action="store_true",
+                        help="禁用 DeepSeek 思维链, 直接走本地规则引擎")
     parser.add_argument("--stream", action="store_true", help="流式输出")
     parser.add_argument("--debug", action="store_true", help="打印记忆与思维链")
     parser.add_argument("--check", action="store_true",
@@ -860,6 +985,8 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("mcp", {}).setdefault("write_back", {})["enabled"] = False
     if args.no_cot:
         config.setdefault("cot", {})["enabled"] = False
+    if args.no_deepseek:
+        config.setdefault("deepseek", {})["enabled"] = False
 
     mw = Middleware(config)
 

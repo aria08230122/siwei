@@ -1,6 +1,22 @@
 # 复制为 config.yaml 后填写。字符串里可用 ${ENV_VAR} 或 ${ENV_VAR:-默认值} 读取环境变量。
+#
+# 流程: 用户消息 -> DeepSeek 生成思维链 -> 思维链 + 用户消息 + 人格模板 -> Claude 生成正式回复
+# 两个模型完全独立, base_url 与 key 分开配置。
 
-# ---- 第三方 Claude API 站点 (OpenAI 兼容格式) ----
+# ---- DeepSeek API (思维链, 用 DeepSeek 官方免费额度) ----
+deepseek:
+  enabled: true
+  base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+  api_key: ${DEEPSEEK_API_KEY}        # 建议放环境变量
+  model: ${DEEPSEEK_MODEL:-deepseek-chat}
+  max_tokens: 800
+  temperature: 0.6
+  timeout: 60
+  # 给 DeepSeek 的系统提示, 决定它怎样产出思维链。不填则用脚本内置默认值。
+  # system_prompt: |
+  #   你是另一个 AI 人格在回复用户前的'内心思考'模块, ...
+
+# ---- 第三方 Claude API 站点 (OpenAI 兼容格式, 出正式回复) ----
 claude:
   base_url: ${CLAUDE_BASE_URL:-https://your-third-party-site/v1}
   api_key: ${CLAUDE_API_KEY}          # 建议放环境变量，不要写死在文件里
@@ -37,7 +53,7 @@ persona:
   dir: personas
   default: default
 
-# ---- 本地思维链规则引擎 (不调任何 API) ----
+# ---- 本地规则引擎 (DeepSeek 失败 / 禁用时的兜底, 不调任何 API) ----
 cot:
   enabled: true
   # 不填 rules 时使用脚本内置的默认规则。如需自定义，按下面格式覆盖:
