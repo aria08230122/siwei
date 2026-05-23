@@ -1,11 +1,12 @@
 # 复制为 config.yaml 后填写。字符串里可用 ${ENV_VAR} 或 ${ENV_VAR:-默认值} 读取环境变量。
 #
-# 流程: 用户消息 -> DeepSeek 生成思维链 -> 思维链 + 用户消息 + 人格模板 -> Claude 生成正式回复
-# 两个模型完全独立, base_url 与 key 分开配置。
+# 流程: 用户消息 -> DeepSeek 充当"人格的私人情感分析师"出第三人称分析
+#       -> 分析 + 用户消息 + 人格模板 -> Claude 用自己的声音和情感颗粒度出声
+# 两个模型完全独立, base_url 与 key 分开配置; 分析师不替 Claude 演人格, 只搭台。
 
-# ---- DeepSeek API (思维链; 官方端点或第三方贩子都行, 只要兼容 OpenAI 格式) ----
-# 实现细节: DeepSeek 收到的 system 消息 = 人格全文 + 元指令,
-#   所以它出思路时直接'是'这个人格 (例如沈熄), 而不是站在外面分析它。
+# ---- DeepSeek API (副脑 / 情感分析师; 官方端点或第三方贩子都行, 只要兼容 OpenAI 格式) ----
+# 实现细节: DeepSeek 收到的 system 消息 = 人格全文 (作为关系背景) + 元指令 (角色=分析师);
+#   所以它不模仿人格的语气, 只用第三人称给 Claude 出一份分析报告。
 deepseek:
   enabled: true
   # 官方端点: https://api.deepseek.com/v1
