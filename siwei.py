@@ -899,12 +899,21 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False,
         stream = bool(body.get("stream", False))
         rebuilt, user_text, memory, cot = mw.build_server_messages(messages)
         if show_debug:
-            # 一行简短状态 (扫日志看趋势用) + CoT 全文 (具体内容)
-            print(f"[serve] user={user_text[:40]!r} mem={'Y' if memory else 'N'} "
+            # 一行简短状态 (扫日志看趋势用) + 各段全文 (具体内容)
+            print(f"[serve] user_preview={user_text[:40]!r} mem={'Y' if memory else 'N'} "
                   f"cot={'Y' if cot else 'N'} stream={stream} echo={echo_cot}",
                   file=sys.stderr)
+            # 原始请求的所有 message (含客户端的 system / Operit 自动注入的内容)
+            print("[serve][raw_messages]", file=sys.stderr)
+            for i, m in enumerate(messages):
+                role = m.get("role", "?")
+                content = _content_text(m.get("content", ""))
+                print(f"  [{i}] {role}: {content}", file=sys.stderr)
+            print(f"[serve][user_text_for_memory]\n{user_text}\n", file=sys.stderr)
             if memory:
                 print(f"[serve][memory]\n{memory}\n", file=sys.stderr)
+            else:
+                print(f"[serve][memory] (空, OB 没匹配到任何记忆)\n", file=sys.stderr)
             if cot:
                 print(f"[serve][cot]\n{cot}\n", file=sys.stderr)
             sys.stderr.flush()
