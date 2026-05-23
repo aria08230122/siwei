@@ -3,18 +3,24 @@
 # 流程: 用户消息 -> DeepSeek 生成思维链 -> 思维链 + 用户消息 + 人格模板 -> Claude 生成正式回复
 # 两个模型完全独立, base_url 与 key 分开配置。
 
-# ---- DeepSeek API (思维链, 用 DeepSeek 官方免费额度) ----
+# ---- DeepSeek API (思维链; 官方端点或第三方贩子都行, 只要兼容 OpenAI 格式) ----
+# 实现细节: DeepSeek 收到的 system 消息 = 人格全文 + 元指令,
+#   所以它出思路时直接'是'这个人格 (例如沈熄), 而不是站在外面分析它。
 deepseek:
   enabled: true
+  # 官方端点: https://api.deepseek.com/v1
+  # 第三方贩子: 直接换成贩子给的 base_url 即可, 通常形如 https://xxx.com/v1
   base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
   api_key: ${DEEPSEEK_API_KEY}        # 建议放环境变量
   model: ${DEEPSEEK_MODEL:-deepseek-chat}
   max_tokens: 800
   temperature: 0.6
   timeout: 60
-  # 给 DeepSeek 的系统提示, 决定它怎样产出思维链。不填则用脚本内置默认值。
+  # 元指令: 拼在人格全文之后, 决定它输出怎样的思维链 (要点条数 / 风格等)。
+  # 不填则用脚本内置默认; 人格全文永远会在前面自动拼接, 不要在这里重复人格设定。
   # system_prompt: |
-  #   你是另一个 AI 人格在回复用户前的'内心思考'模块, ...
+  #   ---
+  #   接下来用户会说一句话, 你只在心里想几条要点, 不要直接回复 ...
 
 # ---- 第三方 Claude API 站点 (OpenAI 兼容格式, 出正式回复) ----
 claude:

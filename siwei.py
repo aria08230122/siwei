@@ -443,25 +443,26 @@ class MCPClient:
 # --------------------------------------------------------------------------- #
 # DeepSeek API 客户端 (OpenAI 兼容格式, 专门用于生成思维链)
 # --------------------------------------------------------------------------- #
-_DEFAULT_COT_SYSTEM = (
-    "你是另一个 AI 人格在回复用户前的'内心思考'模块。"
-    "你不会直接对用户说话，你的输出只会被喂给真正出面回复的模型当作思路提示。"
-    "\n\n每次你会收到:\n"
-    "  - 正在使用的人格的简介\n"
-    "  - 那个人格脑海里浮现的相关记忆 (可能为空)\n"
-    "  - 用户的最新发言\n"
-    "\n请用第一人称, 像那个人格自己在心里想一样, 输出 3-6 条简短要点, 涵盖:\n"
-    "  1. 用户这句话在表达什么 (字面 + 真实意图)\n"
-    "  2. 我此刻的判断和情绪\n"
-    "  3. 浮现的记忆里哪些值得用、哪些不用提\n"
-    "  4. 回复的语气、节奏、要避开的雷区\n"
-    "\n要求: 直接进入要点, 不要总结开场白; 中文; 不要包装, 坦诚一点;"
-    " 不要替对方写出最终回复, 只写思路。"
+# 元指令: 在人格全文之后追加, 告诉模型这次不出面回复, 只输出 TA 的内心思路。
+_DEFAULT_COT_META = (
+    "---\n"
+    "(以上是你完整的人格设定 — 你就是这个人, 上面写的所有规则、口吻、关系、"
+    "禁忌都属于你自己。)\n\n"
+    "接下来用户会说一句话, 但你这次不出面回复 TA。你的任务是把'你看到这句话"
+    "之后, 在心里想的几条要点'写出来, 给真正出面回复的另一个'你'当作思路提示。"
+    "用户在聊天界面看不到这段, 它只会喂给下游模型。\n\n"
+    "要求:\n"
+    "  - 第一人称, 你自己在心里想的话, 完全按照上面人格的口吻\n"
+    "  - 3-6 条短要点, 直接进入, 不要任何开场白或总结\n"
+    "  - 涵盖: 用户字面意思 + 真实意图; 我此刻的判断和情绪; 浮现的记忆里"
+    "哪些值得用、哪些不要提; 回复时的语气、节奏、要避开的雷区\n"
+    "  - 坦诚, 不要包装, 不要道德说教, 不要 AI 味\n"
+    "  - 不要替自己写出最终回复, 只写思路\n"
 )
 
 
 class DeepSeekClient:
-    """DeepSeek API 客户端，给 Claude 出面之前先生成一段思维链。"""
+    """DeepSeek API 客户端，给 Claude 出面之前先以人格身份生成一段思维链。"""
 
     def __init__(self, cfg: dict):
         self.enabled = bool(cfg.get("enabled", True))
@@ -471,7 +472,8 @@ class DeepSeekClient:
         self.max_tokens = cfg.get("max_tokens", 800)
         self.temperature = cfg.get("temperature", 0.6)
         self.timeout = cfg.get("timeout", 60)
-        self.system_prompt = (cfg.get("system_prompt") or _DEFAULT_COT_SYSTEM).strip()
+        # 元指令; 用户可在 config 里覆盖以微调思维链风格, 但人格全文永远在前面拼接
+        self.meta_prompt = (cfg.get("system_prompt") or _DEFAULT_COT_META).strip()
         if self.enabled:
             if not self.base_url:
                 sys.exit("配置缺失: deepseek.base_url (或将 deepseek.enabled 设为 false)")
@@ -485,19 +487,28 @@ class DeepSeekClient:
             return f"{self.base_url}/chat/completions"
         return f"{self.base_url}/v1/chat/completions"
 
-    def think(self, user_input: str, memory: str = "", persona_hint: str = "") -> str:
-        """生成思维链文本; 失败/未启用时返回空串, 调用方自行回落。"""
+    def think(self, user_input: str, persona_prompt: str = "",
+              memory: str = "") -> str:
+        """以 persona_prompt 描述的身份生成思维链。
+
+        DeepSeek 收到的 system 消息 = 人格全文 + 元指令；这样它在出思路时
+        就直接'是'这个人格，而不是站在外面分析这个人格。
+        失败/未启用时返回空串，调用方负责回落。
+        """
         if not self.enabled or not user_input.strip():
             return ""
-        ctx_parts: list[str] = []
-        if persona_hint:
-            ctx_parts.append(f"[正在使用的人格简介]\n{persona_hint}")
+        system_chunks = [persona_prompt.strip(), self.meta_prompt] \
+            if persona_prompt.strip() else [self.meta_prompt]
+        system_content = "\n\n".join(system_chunks)
+
+        user_chunks: list[str] = []
         if memory:
-            ctx_parts.append(f"[那个人格脑海里浮现的相关记忆]\n{memory}")
-        ctx_parts.append(f"[用户的最新发言]\n{user_input}")
+            user_chunks.append(f"[你脑海里浮现的相关记忆]\n{memory}")
+        user_chunks.append(f"[用户的最新发言]\n{user_input}")
+
         messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": "\n\n".join(ctx_parts)},
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": "\n\n".join(user_chunks)},
         ]
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -660,16 +671,15 @@ class Middleware:
         self.max_history = config.get("max_history", 10)
 
     def _generate_cot(self, user_input: str, memory: str) -> str:
-        """先让 DeepSeek 出思维链; 失败或未启用时回落到本地规则引擎."""
+        """先让 DeepSeek 以人格身份出思维链; 失败或未启用时回落到本地规则引擎."""
         if self.deepseek.enabled:
-            persona_hint = (self.persona.description
-                            or self.persona.style
-                            or self.persona.name)
             cot = self.deepseek.think(
-                user_input, memory=memory, persona_hint=persona_hint,
+                user_input,
+                persona_prompt=self.persona.build_system_prompt(),
+                memory=memory,
             )
             if cot:
-                return f"[思维链 / DeepSeek]\n{cot}"
+                return f"[思维链 / DeepSeek 以 {self.persona.name} 身份]\n{cot}"
         return self.rule_engine.reason(user_input, memory)
 
     def _assemble_system(self, memory: str, cot: str,
@@ -927,7 +937,7 @@ def check_connection(mw: Middleware) -> int:
         try:
             thought = deepseek.think(
                 "ping, 请用一两句话给我一段思考示例。",
-                persona_hint="自检",
+                persona_prompt=mw.persona.build_system_prompt(),
             )
             if thought:
                 preview = thought.replace("\n", " ")[:80]
