@@ -8,6 +8,12 @@ LOG_FILE="$DIR/.siwei.log"
 PERSONA="${SIWEI_PERSONA:-shenxi}"
 PORT="${SIWEI_PORT:-5001}"
 HOST="${SIWEI_HOST:-0.0.0.0}"
+# 1 = 把每轮的记忆/思维链全文打到 .siwei.log; 配合 `logs -f` 实时看 (验证方式 A)
+DEBUG_FLAG=""
+[ "${SIWEI_DEBUG:-0}" = "1" ] && DEBUG_FLAG="--debug"
+# 1 = 在每条沈熄回复前注入 🧠[副脑] 分析块, 让 Operit 直接看见 (验证方式 B)
+ECHO_FLAG=""
+[ "${SIWEI_ECHO_COT:-0}" = "1" ] && ECHO_FLAG="--echo-cot"
 
 is_running() {
   [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null
@@ -19,12 +25,15 @@ cmd_start() {
     return 0
   fi
   cd "$DIR" || { echo "找不到目录: $DIR"; return 1; }
+  # shellcheck disable=SC2086  # DEBUG_FLAG / ECHO_FLAG 可能为空, 不要加引号
   nohup python3 siwei.py -p "$PERSONA" --serve --host "$HOST" --port "$PORT" \
-    >"$LOG_FILE" 2>&1 &
+    $DEBUG_FLAG $ECHO_FLAG >"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"
   sleep 1
   if is_running; then
     echo "siwei 已启动 (pid=$(cat "$PID_FILE"), port=$PORT, 人格=$PERSONA)"
+    [ -n "$DEBUG_FLAG" ] && echo "  debug 已开: tail -f $LOG_FILE 可看每轮副脑全文"
+    [ -n "$ECHO_FLAG" ] && echo "  echo-cot 已开: 沈熄每条回复会先吐一段 🧠[副脑] 分析块"
     echo "日志: $LOG_FILE"
   else
     echo "启动失败,看日志最后几行:"
@@ -63,10 +72,15 @@ cmd_status() {
 }
 
 cmd_logs() {
-  if [ -f "$LOG_FILE" ]; then
-    tail -n "${1:-50}" "$LOG_FILE"
-  else
+  if [ ! -f "$LOG_FILE" ]; then
     echo "尚无日志 ($LOG_FILE)"
+    return 0
+  fi
+  # 第一个参数是 -f 就持续跟随 (验证方式 A); 否则按行数显示尾部
+  if [ "${1:-}" = "-f" ]; then
+    tail -n "${2:-20}" -f "$LOG_FILE"
+  else
+    tail -n "${1:-50}" "$LOG_FILE"
   fi
 }
 
@@ -75,16 +89,22 @@ case "${1:-status}" in
   stop)    cmd_stop ;;
   restart) cmd_stop; cmd_start ;;
   status)  cmd_status ;;
-  logs)    cmd_logs "${2:-50}" ;;
+  logs)    cmd_logs "${2:-50}" "${3:-}" ;;
   *)
     cat <<EOF
-用法: $0 {start|stop|restart|status|logs [N]}
+用法: $0 {start|stop|restart|status|logs [N] | logs -f [N]}
 
 环境变量可覆盖默认值:
-  SIWEI_DIR       siwei 仓库目录 (默认 ~/siwei)
-  SIWEI_PERSONA   人格名 (默认 shenxi)
-  SIWEI_PORT      监听端口 (默认 5001)
-  SIWEI_HOST      监听地址 (默认 0.0.0.0)
+  SIWEI_DIR        siwei 仓库目录 (默认 ~/siwei)
+  SIWEI_PERSONA    人格名 (默认 shenxi)
+  SIWEI_PORT       监听端口 (默认 5001)
+  SIWEI_HOST       监听地址 (默认 0.0.0.0)
+  SIWEI_DEBUG      =1 时把每轮副脑/记忆全文写日志 (验证方式 A)
+  SIWEI_ECHO_COT   =1 时让每条回复前面带一段 🧠[副脑] 分析 (验证方式 B)
+
+例子:
+  SIWEI_DEBUG=1 SIWEI_ECHO_COT=1 $0 restart   # 同时开 A + B
+  $0 logs -f                                  # 实时跟日志 (A)
 EOF
     exit 1
     ;;

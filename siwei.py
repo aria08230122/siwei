@@ -854,8 +854,37 @@ def _server_writeback(mw: Middleware, user_text: str, reply: str) -> None:
         mw.mcp.write_memory(f"用户: {user_text}\n{mw.persona.name}: {reply}")
 
 
-def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int:
-    """以 OpenAI 兼容的 API 服务模式运行，监听 /v1/chat/completions。"""
+def _format_cot_echo(cot: str) -> str:
+    """格式化要前置到回复里的副脑分析块 (B 模式: --echo-cot 启用时使用)。"""
+    if not cot:
+        return ""
+    return f"🧠[副脑]\n{cot.strip()}\n---\n\n"
+
+
+def _make_sse_chunk(content: str, model: str) -> bytes:
+    """构造一个 OpenAI 兼容的 SSE chunk, 用于在真正 upstream 流之前先把 CoT 推出去。"""
+    payload = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"role": "assistant", "content": content},
+            "finish_reason": None,
+        }],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def serve(mw: Middleware, host: str, port: int, show_debug: bool = False,
+          echo_cot: bool = False) -> int:
+    """以 OpenAI 兼容的 API 服务模式运行，监听 /v1/chat/completions。
+
+    show_debug=True 时把每轮的记忆/CoT 全文打到 stderr (落到 .siwei.log, 适合 tail -f)。
+    echo_cot=True 时在每条返回给客户端的回复前面前置一段 🧠[副脑] 分析块, 让 Operit
+    那种没有侧栏的客户端也能直接看到思维链。
+    """
     try:
         from flask import Flask, Response, jsonify, request, stream_with_context
     except ImportError:
@@ -870,8 +899,15 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int
         stream = bool(body.get("stream", False))
         rebuilt, user_text, memory, cot = mw.build_server_messages(messages)
         if show_debug:
+            # 一行简短状态 (扫日志看趋势用) + CoT 全文 (具体内容)
             print(f"[serve] user={user_text[:40]!r} mem={'Y' if memory else 'N'} "
-                  f"cot={'Y' if cot else 'N'} stream={stream}", file=sys.stderr)
+                  f"cot={'Y' if cot else 'N'} stream={stream} echo={echo_cot}",
+                  file=sys.stderr)
+            if memory:
+                print(f"[serve][memory]\n{memory}\n", file=sys.stderr)
+            if cot:
+                print(f"[serve][cot]\n{cot}\n", file=sys.stderr)
+            sys.stderr.flush()
         try:
             upstream = mw.claude.request_raw(rebuilt, stream=stream, base_payload=body)
         except requests.RequestException as e:
@@ -879,8 +915,21 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int
                                        "type": "upstream_error"}}), 502
 
         ctype = upstream.headers.get("Content-Type", "application/json")
+        cot_prefix = _format_cot_echo(cot) if echo_cot else ""
 
         if not stream:
+            if cot_prefix and upstream.status_code < 400:
+                # 解 upstream JSON, 把 CoT 拼到 message.content 前面再返回
+                try:
+                    data = upstream.json()
+                    reply = data["choices"][0]["message"]["content"] or ""
+                    data["choices"][0]["message"]["content"] = cot_prefix + reply
+                    _server_writeback(mw, user_text, reply)
+                    body_out = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                    return Response(body_out, status=upstream.status_code,
+                                    content_type="application/json")
+                except Exception:  # noqa: BLE001 - 解析失败就回退到透传
+                    pass
             content = upstream.content
             try:
                 reply = upstream.json()["choices"][0]["message"]["content"]
@@ -890,6 +939,9 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int
             return Response(content, status=upstream.status_code, content_type=ctype)
 
         def generate():
+            if cot_prefix:
+                # 先推一个合成 chunk 把 CoT 前缀送出去, 客户端会自然拼到正文前面
+                yield _make_sse_chunk(cot_prefix, mw.claude.model)
             buf: list[bytes] = []
             for chunk in upstream.iter_content(chunk_size=None):
                 if chunk:
@@ -919,7 +971,10 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int
     print(f"siwei API 服务已启动 -> http://{host}:{port}/v1/chat/completions")
     print(f"  人格={mw.persona.name}  上游模型={mw.claude.model}  "
           f"记忆={'on' if mw.mcp.enabled else 'off'}  "
-          f"写回={'on' if mw.mcp.write_enabled else 'off'}")
+          f"写回={'on' if mw.mcp.write_enabled else 'off'}  "
+          f"副脑={'DeepSeek' if mw.deepseek.enabled else '规则引擎'}  "
+          f"debug={'on' if show_debug else 'off'}  "
+          f"echo_cot={'on' if echo_cot else 'off'}")
     print(f"  把客户端(如 Operit)的 API 地址指向 http://<本机IP>:{port}/v1 即可。")
     app.run(host=host, port=port, threaded=True)
     return 0
@@ -1006,6 +1061,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="自检: 测试 OB MCP 与 Claude API 连通性后退出")
     parser.add_argument("--serve", action="store_true",
                         help="以 OpenAI 兼容 API 服务模式运行 (/v1/chat/completions)")
+    parser.add_argument("--echo-cot", action="store_true",
+                        help="serve 模式下, 在每条回复前面注入 🧠[副脑] 分析块, 方便客户端验证思维链在跑")
     parser.add_argument("--host", default="0.0.0.0", help="服务监听地址 (默认 0.0.0.0)")
     parser.add_argument("--port", type=int, default=5001, help="服务监听端口 (默认 5001)")
     args = parser.parse_args(argv)
@@ -1028,7 +1085,8 @@ def main(argv: list[str] | None = None) -> int:
         return check_connection(mw)
 
     if args.serve:
-        return serve(mw, args.host, args.port, show_debug=args.debug)
+        return serve(mw, args.host, args.port,
+                     show_debug=args.debug, echo_cot=args.echo_cot)
 
     if args.message:
         try:
