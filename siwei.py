@@ -666,10 +666,39 @@ def _content_text(content: Any) -> str:
     return ""
 
 
+# Operit 在 user 消息里自动注入的几种块, 不是用户真打的内容; 给 OB 查询和副脑用
+# 之前要剥掉, 否则查询里全是天气/位置/时间噪音, OB 永远命中不到记忆。
+# Claude 那一路保留原文, 它需要那些上下文。
+_OPERIT_FOLD_RE = re.compile(r"<fold\b[^>]*>.*?</fold>", re.DOTALL | re.IGNORECASE)
+_OPERIT_ATTACH_RE = re.compile(
+    r"<attachment\b[^>]*>.*?</attachment>", re.DOTALL | re.IGNORECASE,
+)
+# 形如 "[31] user:" 这种序号前缀, 通常出现在剥完标签后的开头
+_OPERIT_INDEX_RE = re.compile(
+    r"^\s*\[\s*\d+\s*\]\s*(?:user|assistant|system)\s*[:：]\s*", re.IGNORECASE,
+)
+
+
+def _strip_client_injections(text: str) -> str:
+    """剥掉 Operit 之类客户端自动塞进 user 消息里的非用户内容。
+
+    剥的内容: <fold>...</fold> / <attachment ...>...</attachment> / 开头的"[N] user:"。
+    剥完只剩用户真正打字的那部分; 给 OB 检索和副脑分析师用, 不影响给 Claude 的消息。
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    cleaned = _OPERIT_FOLD_RE.sub("", text)
+    cleaned = _OPERIT_ATTACH_RE.sub("", cleaned)
+    cleaned = _OPERIT_INDEX_RE.sub("", cleaned.strip())
+    # 多个剥完之后中间留下的空行 / 多余空白也清一下
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+
 def _last_user_text(messages: list[dict]) -> str:
     for m in reversed(messages):
         if m.get("role") == "user":
-            return _content_text(m.get("content", ""))
+            return _strip_client_injections(_content_text(m.get("content", "")))
     return ""
 
 
