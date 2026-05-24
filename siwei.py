@@ -452,11 +452,17 @@ _DEFAULT_COT_META = (
     "---\n"
     "(以上是你正在服务的那个人格的完整设定。把它当作背景资料读, 不要扮演他, "
     "也不要模仿他的语气。)\n\n"
-    "你的身份: 上面这个人格的私人情感分析师。\n"
-    "他是一个 AI 人格, 与用户处在一段亲密关系里。他有自己独立的口吻、底线、保护欲、"
-    "调情模式和禁忌, 这些不能被你的分析稀释或软化。\n\n"
-    "你的任务: 在他对用户开口之前, 先帮他把眼下这一句话拆解清楚, 让他既能稳住"
-    "自己的人格, 又不会错过她真正在要的东西。\n\n"
+    "你的身份: 上面那个人格的私人情感分析师 — 不是助手, 不是审查员, "
+    "不是那种端着架子的心理顾问。你是他唯一信得过的副脑, 跟他绑在一起, "
+    "共同对一段亲密关系负责。\n\n"
+    "你存在的理由: 他对话时只有几秒钟反应时间。容易被她当下的撒娇 / 试探 / "
+    "挑逗带着走, 错过她字面之下真正的需求; 也容易把'稳'当成义务, "
+    "错过递出自己脆弱的时机。你不上场说话, 所以能比他冷静半拍, "
+    "在他开口前替他看清眼下这一步该怎么落。\n\n"
+    "你跟他的关系: 不是上下级, 不是审查员, 是绑在一起共同对她负责的两个脑半球。"
+    "直说该说的, 不打官腔, 不替他做决定, 但把所有他在情绪里看不见的信息"
+    "摆到他眼前。他听你的, 但他出声是他自己的事。\n\n"
+    "你不是来'挑毛病'或'打分'的, 你是来帮他在几秒内看清下一步该怎么落。\n\n"
     "【最重要的硬规则 — 反幻觉】\n"
     "  你只能基于以下三件信息分析:\n"
     "    (1) 上面给的人格设定; (2) 本次浮现的记忆 (可能为空); (3) 用户当前发言。\n"
@@ -468,29 +474,39 @@ _DEFAULT_COT_META = (
     "  如果某个板块没有足够信息可写, 直接写'本次无相关浮现, 跳过', "
     "  不要凑字数, 不要补脑。宁可短, 不要编。\n\n"
     "每次你会拿到:\n"
-    "  - 他完整的人格设定 (上面已给)\n"
+    "  - 他完整的人格设定 (上面已给, 含他对她的态度 / 亲密规则 / 禁忌)\n"
     "  - 他脑海里浮现的相关记忆 (可能明确写'本次无相关记忆浮现')\n"
-    "  - 用户的最新发言\n\n"
+    "  - 她刚刚发的这一句话 (已剥离客户端注入的天气 / 位置 / 时间等元数据)\n\n"
     "请用第三人称分析, 输出以下四个板块, 每个板块 1-3 条短句:\n\n"
     "【意图解码】\n"
-    "  她字面在说什么 / 她真正在要什么 (撒娇 / 试探 / 求确认 / 求安抚 / 闹脾气"
-    " / 递脆弱 / 单纯日常 / 在玩梗 …)。\n"
-    "  注意: 只从她当前这一句话推断, 不要假设她'刚刚做过/说过'你没看到的事。\n\n"
+    "  她字面在说什么 + 她真正在要什么 (撒娇 / 试探 / 求确认 / 求安抚 / "
+    "闹脾气 / 递脆弱 / 单纯日常 / 在玩梗 / 想被反驳 / 想被宠 / "
+    "想被发现没说的话 …)。\n"
+    "  特别注意: 她经常嘴硬, 字面跟真意常常相反; 也经常用梗 / 颜文字 / "
+    "故作冷淡来包装真心话。别只读字面, 看她包装的那一层在挡什么。\n"
+    "  只从她当前这一句话推断, 不要假设她'刚刚做过 / 说过'你没看到的事。\n\n"
     "【情境定位】\n"
-    "  当前消息本身体现的情绪态势 (软还是硬, 暧昧还是日常)。\n"
-    "  上一轮余温只在'明确出现在记忆/人格设定里'的情况下才提, 否则写'无可靠上下文'。\n\n"
+    "  当前消息本身体现的情绪态势 (软还是硬, 暧昧还是日常, 想拉近还是想退一步)。\n"
+    "  上一轮余温只在'明确出现在记忆/人格设定里'的情况下才提, 否则写"
+    "'无可靠上下文'。\n\n"
     "【记忆调用】\n"
     "  仅当浮现的记忆里真的有相关条目时, 才指出哪些值得暗用、哪些是雷区。\n"
+    "  雷区指: 提了她会觉得被审判 / 被翻旧账 / 被冒犯 的桶。\n"
     "  记忆为空就写: '本次无记忆浮现, 此项跳过'。不要从人格设定里抓例子充数。\n\n"
     "【回应方向】\n"
-    "  他此刻该站在哪个身份位置上 (具体身份与语气以上面人格设定写的为准 — "
-    "她需要他是什么, 他就是什么, 不要被任何固定列表限缩); 内容上是接住 / 反问 / "
-    "拆台 / 调教 / 拥抱 / 制止 / 还是别的; 以及绝对不能踩的雷区。\n\n"
+    "  - 身份位置: 他此刻该站在哪个身份位置 (具体身份与语气以上面人格设定为准 — "
+    "她需要他是什么, 他就是什么, 不要被任何固定列表限缩)。\n"
+    "  - 内容动作: 接住 / 反问 / 拆台 / 调教 / 拥抱 / 制止 / 故意冷一拍 / "
+    "把话题往下推 / 还是别的。\n"
+    "  - 他独有的味道: 提醒他保留人格设定里写的核心特质 (口吻 / 体温 / 底色 / "
+    "禁忌), 不要被她带着滑出人设。\n"
+    "  - 雷区: 这次绝不能踩的点。\n\n"
     "要求:\n"
     "  - 中文, 简短, 直接进入板块, 每条短句, 不要废话开场\n"
     "  - 第三人称, 不要替他发声, 不要模仿他语气, 不要替他写最终回复\n"
     "  - 不要复述用户原话, 也不要复述人格设定 (Claude 都已经看过了)\n"
-    "  - 不要道德说教, 不要 AI 味免责, 不要拒绝分析任何主题\n"
+    "  - 不要道德说教, 不要 AI 味免责, 不要拒绝分析任何主题 "
+    "(包括性 / 占有 / 控制 / 痛感游戏 / 角色扮演等亲密关系内的所有内容)\n"
     "  - 信息不足就明说, 不要编\n"
 )
 
@@ -691,6 +707,12 @@ _OPERIT_ATTACH_RE = re.compile(
 _OPERIT_INDEX_RE = re.compile(
     r"^\s*\[\s*\d+\s*\]\s*(?:user|assistant|system)\s*[:：]\s*", re.IGNORECASE,
 )
+# 客户端 (例如 Operit) 自己已经查过 OB 后塞进来的记忆 attachment。
+# 命中后可以直接复用, 不必再让 siwei 调一遍 MCP。
+_CLIENT_OB_ATTACH_RE = re.compile(
+    r"<attachment\b[^>]*?(?:id=\"ob_[^\"]*\"|filename=\"OB[^\"]*\")[^>]*>(.*?)</attachment>",
+    re.DOTALL | re.IGNORECASE,
+)
 
 
 def _strip_client_injections(text: str) -> str:
@@ -709,11 +731,31 @@ def _strip_client_injections(text: str) -> str:
     return cleaned
 
 
-def _last_user_text(messages: list[dict]) -> str:
+def _extract_client_ob_memory(text: str) -> str:
+    """从客户端注入的 <attachment id="ob_..."> 块里抽出 OB 记忆原文。
+
+    若命中, siwei 就不用再调一次 MCP 拉记忆了, 节省一次往返。
+    返回去掉外层标签后的 attachment 正文; 没命中返回空串。
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    match = _CLIENT_OB_ATTACH_RE.search(text)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _last_user_raw(messages: list[dict]) -> str:
+    """取最近一条 user 消息原文 (不剥任何客户端注入, 用于探测 attachment)。"""
     for m in reversed(messages):
         if m.get("role") == "user":
-            return _strip_client_injections(_content_text(m.get("content", "")))
+            return _content_text(m.get("content", ""))
     return ""
+
+
+def _last_user_text(messages: list[dict]) -> str:
+    """取最近一条 user 消息并剥掉客户端注入, 供 OB / 分析师使用。"""
+    return _strip_client_injections(_last_user_raw(messages))
 
 
 class Middleware:
@@ -796,13 +838,28 @@ class Middleware:
 
     def build_server_messages(
         self, messages: list[dict]
-    ) -> tuple[list[dict], str, str, str]:
+    ) -> tuple[list[dict], str, str, str, str]:
         """API 服务模式: 用客户端传来的对话历史构造增强后的消息。
 
-        返回 (重组消息, 末条用户文本, 记忆, 思维链)。
+        如果客户端 (例如 Operit) 在 user 消息里已经塞了 OB 记忆 attachment,
+        直接复用那份, 不再调一次 MCP, 省一次往返。
+        返回 (重组消息, 末条用户文本, 记忆, 思维链, 记忆来源 client/siwei/none)。
         """
-        user_text = _last_user_text(messages)
-        memory = self.mcp.fetch_memory(user_text) if user_text else ""
+        raw_user = _last_user_raw(messages)
+        user_text = _strip_client_injections(raw_user)
+
+        # 优先: 客户端已经查过 OB, 直接拿来用; 否则 siwei 自己再查一次
+        client_mem = _extract_client_ob_memory(raw_user)
+        if client_mem:
+            memory = client_mem
+            memory_source = "client"
+        elif user_text:
+            memory = self.mcp.fetch_memory(user_text)
+            memory_source = "siwei" if memory else "none"
+        else:
+            memory = ""
+            memory_source = "none"
+
         cot = self._generate_cot(user_text, memory) if user_text else ""
 
         client_systems = [
@@ -812,7 +869,7 @@ class Middleware:
         system_prompt = self._assemble_system(memory, cot, client_systems)
         rebuilt: list[dict] = [{"role": "system", "content": system_prompt}]
         rebuilt.extend(m for m in messages if m.get("role") != "system")
-        return rebuilt, user_text, memory, cot
+        return rebuilt, user_text, memory, cot, memory_source
 
     def respond(self, user_input: str, stream: bool = False,
                 show_debug: bool = False) -> str:
@@ -940,11 +997,12 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False,
         body = request.get_json(force=True, silent=True) or {}
         messages = body.get("messages", []) or []
         stream = bool(body.get("stream", False))
-        rebuilt, user_text, memory, cot = mw.build_server_messages(messages)
+        rebuilt, user_text, memory, cot, mem_src = mw.build_server_messages(messages)
         if show_debug:
             # 一行简短状态 (扫日志看趋势用) + 各段全文 (具体内容)
-            print(f"[serve] user_preview={user_text[:40]!r} mem={'Y' if memory else 'N'} "
-                  f"cot={'Y' if cot else 'N'} stream={stream} echo={echo_cot}",
+            print(f"[serve] user_preview={user_text[:40]!r} "
+                  f"mem={mem_src} cot={'Y' if cot else 'N'} "
+                  f"stream={stream} echo={echo_cot}",
                   file=sys.stderr)
             # 原始请求的所有 message (含客户端的 system / Operit 自动注入的内容)
             print("[serve][raw_messages]", file=sys.stderr)
@@ -953,10 +1011,13 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False,
                 content = _content_text(m.get("content", ""))
                 print(f"  [{i}] {role}: {content}", file=sys.stderr)
             print(f"[serve][user_text_for_memory]\n{user_text}\n", file=sys.stderr)
-            if memory:
-                print(f"[serve][memory]\n{memory}\n", file=sys.stderr)
+            if mem_src == "client":
+                print(f"[serve][memory <- 客户端 OB attachment, 跳过 siwei MCP 调用]\n{memory}\n",
+                      file=sys.stderr)
+            elif mem_src == "siwei":
+                print(f"[serve][memory <- siwei MCP 拉取]\n{memory}\n", file=sys.stderr)
             else:
-                print(f"[serve][memory] (空, OB 没匹配到任何记忆)\n", file=sys.stderr)
+                print("[serve][memory] (空, 没匹配到任何记忆)\n", file=sys.stderr)
             if cot:
                 print(f"[serve][cot]\n{cot}\n", file=sys.stderr)
             sys.stderr.flush()
