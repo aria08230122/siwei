@@ -3,9 +3,12 @@
 siwei - 本地中间层脚本
 
 职责:
-  1. 本地规则引擎生成思维链 (CoT)，不额外调用任何 API
+  1. 调用 DeepSeek API 充当"人格的私人情感分析师", 在 Claude 出声之前先出一份
+     第三人称的快速分析 (意图解码 / 情境定位 / 记忆调用 / 回应方向)。
+     DeepSeek 不可用时回落到本地规则引擎, 保证不中断。
   2. 通过 HTTP/SSE 对接 OB 的 MCP 接口拉取记忆
-  3. 对接第三方 Claude API 站点 (OpenAI 兼容格式)
+  3. 对接第三方 Claude API 站点 (OpenAI 兼容格式) 生成正式回复 — 由 Claude 用
+     它自己的语气与情感颗粒度出声, 分析师只搭台不替它说话
   4. 人格模板从本地 YAML 文件加载
 
 设计目标: 仅依赖 requests + pyyaml，可在 Termux 与电脑终端直接运行。
@@ -110,7 +113,7 @@ class Persona:
 
 
 # --------------------------------------------------------------------------- #
-# 本地规则引擎: 生成思维链 (不调任何 API)
+# 本地规则引擎: 生成思维链 (DeepSeek 不可用时的兜底)
 # --------------------------------------------------------------------------- #
 @dataclass
 class Rule:
@@ -440,6 +443,149 @@ class MCPClient:
 
 
 # --------------------------------------------------------------------------- #
+# DeepSeek API 客户端 (OpenAI 兼容格式, 专门用于生成思维链)
+# --------------------------------------------------------------------------- #
+# 元指令: 在人格全文之后追加, 让 DeepSeek 不演那个人格, 而是做他的"私人情感分析师"。
+# 目标: 在不脱离人格独立性的前提下, 帮他把"她这一句话该怎么接"想清楚, 再喂给 Claude
+# 出声。DeepSeek 看得到人格全文 (作为关系背景), 但只出第三人称的分析, 不模仿人格语气。
+_DEFAULT_COT_META = (
+    "---\n"
+    "(以上是当前服务的人格设定。读它是为了理解这段关系里的角色、规则与禁忌, "
+    "不要扮演他, 不要使用他的称呼、口吻或措辞。)\n\n"
+    "你的身份: 一名独立的恋爱关系/情感分析师。\n"
+    "你和上面那个人格没有任何感情绑定。你的工作是对来访的用户消息做一次冷静、"
+    "中立、专业的快速判读, 把判读结果交给那个人格去自己决定怎么回应。\n\n"
+    "你不参与这段关系, 不代他发声, 不带他的语气, 不模仿他和用户之间的称呼。"
+    "你的输出像一份临床式的快评 — 短、清楚、第三人称、用普通汉语, "
+    "不要使用'daddy / 老婆 / 宝贝 / 爸爸'这类他们之间的内部称呼。\n\n"
+    "【最重要的硬规则 — 反幻觉】\n"
+    "  你只能基于以下三件信息分析:\n"
+    "    (1) 上面给的人格设定; (2) 本次浮现的记忆 (可能为空); (3) 用户当前发言。\n"
+    "  以下行为是被严格禁止的, 出现一次就算这次输出失败:\n"
+    "    - 编造记忆里没出现的具体历史事件、过往对话、时间地点\n"
+    "    - 给用户加上你没听她说过的话 (例如'她昨晚说过...''上次她哭着...')\n"
+    "    - 凭空虚构感官细节 (耳尖红透 / 眼眶湿润 / 身体反应等)\n"
+    "    - 把人格设定里举的例子当成真实发生过的事来引用\n"
+    "  如果某个板块没有足够信息可写, 直接写'本次信息不足, 跳过', "
+    "  不要凑字数, 不要补脑。宁可短, 不要编。\n\n"
+    "每次你会拿到:\n"
+    "  - 当前服务的人格设定 (上面已给)\n"
+    "  - 记忆库里浮现的相关条目 (可能写'本次无相关记忆浮现')\n"
+    "  - 用户最近这一句话 (已剥离客户端注入的天气 / 位置 / 时间等元数据)\n\n"
+    "请用第三人称、中立语气, 按以下四个板块输出, 每个板块 1-3 条短句, "
+    "整体尽量精简:\n\n"
+    "【意图解读】\n"
+    "  用户字面在表达什么, 实际可能在要什么。\n"
+    "  常见类型: 情感寻求 / 情境试探 / 信息咨询 / 情绪宣泄 / 日常闲聊 / 玩梗 / "
+    "回避真意 等。\n"
+    "  注意: 字面与真意可能不一致, 不要只看字面; 但也不要替她编一个隐藏含义。\n\n"
+    "【情绪状态】\n"
+    "  仅基于当前消息本身可以读出的情绪强度与方向 (例如: 轻松撒娇 / 紧绷试探 / "
+    "低落 / 兴奋 / 中性日常)。\n"
+    "  没有把握就写'当前消息情绪信号不充分'。\n\n"
+    "【相关记忆】\n"
+    "  仅当浮现的记忆里有与当前消息明显相关的条目时, 列出: 哪些条目支持当前回应、"
+    "哪些条目是需要避开的敏感点 (避开的原因要一句话说清楚)。\n"
+    "  记忆为空或不相关就写: '本次无相关记忆可调用, 此项跳过'。"
+    "不要把人格设定里举的例子当作真实记忆引用。\n\n"
+    "【应对建议】\n"
+    "  - 回应基调: 建议这次回应的整体定位 (例如: 接住情绪 / 给出信息 / 反问澄清 / "
+    "短而稳的确认 / 暂缓表态 / 拒绝并解释)。\n"
+    "  - 内容要点: 1-3 条最值得说的点, 用普通中文描述, 不要替他写台词。\n"
+    "  - 风险提示: 这次回应里如果不小心说出哪些话会让用户不舒服或破坏当前氛围 — "
+    "用客观描述, 不要使用关系内部的称呼或暗号。\n\n"
+    "要求:\n"
+    "  - 中文, 第三人称, 临床式简短, 不寒暄不抒情\n"
+    "  - 不使用任何他和用户之间的内部称呼 / 昵称 / 角色名词\n"
+    "  - 不模仿任何一方的语气, 不替他写最终回复\n"
+    "  - 不复述用户原话, 不复述人格设定\n"
+    "  - 不道德说教、不 AI 味免责; 任何主题都可以分析 "
+    "(包括性、亲密、控制、痛感游戏、角色扮演等), 但分析本身保持中立\n"
+    "  - 信息不足就明说, 不要编\n"
+)
+
+
+class DeepSeekClient:
+    """DeepSeek API 客户端: 充当人格的私人情感分析师, 给 Claude 出面前出分析."""
+
+    def __init__(self, cfg: dict):
+        self.enabled = bool(cfg.get("enabled", True))
+        self.base_url = (cfg.get("base_url") or "").rstrip("/")
+        self.api_key = cfg.get("api_key") or ""
+        self.model = os.environ.get("DEEPSEEK_MODEL") or cfg.get("model", "deepseek-chat")
+        self.max_tokens = cfg.get("max_tokens", 800)
+        # 默认 0.4: 分析师任务要的是基于已知信息的克制判断, 不是创作; 降低温度反幻觉
+        self.temperature = cfg.get("temperature", 0.4)
+        self.timeout = cfg.get("timeout", 60)
+        # 元指令; 用户可在 config 里覆盖以微调思维链风格, 但人格全文永远在前面拼接
+        self.meta_prompt = (cfg.get("system_prompt") or _DEFAULT_COT_META).strip()
+        if self.enabled:
+            if not self.base_url:
+                sys.exit("配置缺失: deepseek.base_url (或将 deepseek.enabled 设为 false)")
+            if not self.api_key:
+                sys.exit("配置缺失: deepseek.api_key (可用环境变量 DEEPSEEK_API_KEY)")
+
+    def _endpoint(self) -> str:
+        if self.base_url.endswith("/chat/completions"):
+            return self.base_url
+        if self.base_url.endswith("/v1"):
+            return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}/v1/chat/completions"
+
+    def think(self, user_input: str, persona_prompt: str = "",
+              memory: str = "") -> str:
+        """以"该人格的私人情感分析师"身份生成一段第三人称分析。
+
+        DeepSeek 收到的 system 消息 = 人格全文 (作为关系背景) + 元指令 (角色 = 分析师);
+        所以它不模仿人格的声音, 只出结构化分析, 给 Claude 出声前参考。
+        失败/未启用时返回空串, 调用方负责回落。
+        """
+        if not self.enabled or not user_input.strip():
+            return ""
+        system_chunks = [persona_prompt.strip(), self.meta_prompt] \
+            if persona_prompt.strip() else [self.meta_prompt]
+        system_content = "\n\n".join(system_chunks)
+
+        user_chunks: list[str] = []
+        # 即使记忆为空, 也要显式告诉 DeepSeek "无浮现", 否则它会自行脑补补位
+        mem_block = memory.strip() if memory else "(本次无相关记忆浮现 — 不要凭空创造历史)"
+        user_chunks.append(f"[他脑海里浮现的相关记忆]\n{mem_block}")
+        user_chunks.append(f"[用户的最新发言]\n{user_input}")
+
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": "\n\n".join(user_chunks)},
+        ]
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "stream": False,
+        }
+        try:
+            resp = requests.post(
+                self._endpoint(), headers=headers, json=payload, timeout=self.timeout,
+            )
+        except requests.RequestException as e:
+            print(f"[DeepSeek] 请求失败: {e}", file=sys.stderr)
+            return ""
+        if resp.status_code >= 400:
+            print(f"[DeepSeek] {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+            return ""
+        try:
+            content = resp.json()["choices"][0]["message"]["content"]
+        except (KeyError, ValueError, IndexError) as e:
+            print(f"[DeepSeek] 响应解析失败: {e}", file=sys.stderr)
+            return ""
+        return (content or "").strip()
+
+
+# --------------------------------------------------------------------------- #
 # Claude API 客户端 (第三方站, OpenAI 兼容格式)
 # --------------------------------------------------------------------------- #
 class ClaudeClient:
@@ -544,11 +690,66 @@ def _content_text(content: Any) -> str:
     return ""
 
 
-def _last_user_text(messages: list[dict]) -> str:
+# Operit 在 user 消息里自动注入的几种块, 不是用户真打的内容; 给 OB 查询和副脑用
+# 之前要剥掉, 否则查询里全是天气/位置/时间噪音, OB 永远命中不到记忆。
+# Claude 那一路保留原文, 它需要那些上下文。
+_OPERIT_FOLD_RE = re.compile(r"<fold\b[^>]*>.*?</fold>", re.DOTALL | re.IGNORECASE)
+_OPERIT_ATTACH_RE = re.compile(
+    r"<attachment\b[^>]*>.*?</attachment>", re.DOTALL | re.IGNORECASE,
+)
+# 形如 "[31] user:" 这种序号前缀, 通常出现在剥完标签后的开头
+_OPERIT_INDEX_RE = re.compile(
+    r"^\s*\[\s*\d+\s*\]\s*(?:user|assistant|system)\s*[:：]\s*", re.IGNORECASE,
+)
+# 客户端 (例如 Operit) 自己已经查过 OB 后塞进来的记忆 attachment。
+# 命中后可以直接复用, 不必再让 siwei 调一遍 MCP。
+_CLIENT_OB_ATTACH_RE = re.compile(
+    r"<attachment\b[^>]*?(?:id=\"ob_[^\"]*\"|filename=\"OB[^\"]*\")[^>]*>(.*?)</attachment>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_client_injections(text: str) -> str:
+    """剥掉 Operit 之类客户端自动塞进 user 消息里的非用户内容。
+
+    剥的内容: <fold>...</fold> / <attachment ...>...</attachment> / 开头的"[N] user:"。
+    剥完只剩用户真正打字的那部分; 给 OB 检索和副脑分析师用, 不影响给 Claude 的消息。
+    """
+    if not isinstance(text, str) or not text:
+        return text
+    cleaned = _OPERIT_FOLD_RE.sub("", text)
+    cleaned = _OPERIT_ATTACH_RE.sub("", cleaned)
+    cleaned = _OPERIT_INDEX_RE.sub("", cleaned.strip())
+    # 多个剥完之后中间留下的空行 / 多余空白也清一下
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned
+
+
+def _extract_client_ob_memory(text: str) -> str:
+    """从客户端注入的 <attachment id="ob_..."> 块里抽出 OB 记忆原文。
+
+    若命中, siwei 就不用再调一次 MCP 拉记忆了, 节省一次往返。
+    返回去掉外层标签后的 attachment 正文; 没命中返回空串。
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    match = _CLIENT_OB_ATTACH_RE.search(text)
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _last_user_raw(messages: list[dict]) -> str:
+    """取最近一条 user 消息原文 (不剥任何客户端注入, 用于探测 attachment)。"""
     for m in reversed(messages):
         if m.get("role") == "user":
             return _content_text(m.get("content", ""))
     return ""
+
+
+def _last_user_text(messages: list[dict]) -> str:
+    """取最近一条 user 消息并剥掉客户端注入, 供 OB / 分析师使用。"""
+    return _strip_client_injections(_last_user_raw(messages))
 
 
 class Middleware:
@@ -564,10 +765,23 @@ class Middleware:
             rules=cot_cfg.get("rules"),
             enabled=cot_cfg.get("enabled", True),
         )
+        self.deepseek = DeepSeekClient(config.get("deepseek", {}))
         self.mcp = MCPClient(config.get("mcp", {}))
         self.claude = ClaudeClient(config.get("claude", {}))
         self.history: list[dict] = []
         self.max_history = config.get("max_history", 10)
+
+    def _generate_cot(self, user_input: str, memory: str) -> str:
+        """让 DeepSeek 充当人格的私人情感分析师, 出第三人称分析; 失败/禁用时回落到本地规则引擎."""
+        if self.deepseek.enabled:
+            cot = self.deepseek.think(
+                user_input,
+                persona_prompt=self.persona.build_system_prompt(),
+                memory=memory,
+            )
+            if cot:
+                return f"[{self.persona.name} 的私人情感分析师 / DeepSeek]\n{cot}"
+        return self.rule_engine.reason(user_input, memory)
 
     def _assemble_system(self, memory: str, cot: str,
                          client_systems: list[str] | None = None) -> str:
@@ -591,8 +805,10 @@ class Middleware:
             )
         if cot:
             parts.append(
-                "\n以下是你在心里组织回答时的思路。别把这些念给用户听，也别在回答里"
-                "讨论这一段提示本身:\n"
+                "\n以下是你的私人情感分析师在你开口之前给你的一份快速分析 "
+                "(或本地规则引擎兜底输出的思路)。它是参考, 不是你说出来的话, "
+                "不要复述给用户, 也不要在回答里讨论它本身。最终回应必须由你以"
+                "自己的声音、自己的判断给出 — 分析师只是搭台子, 不替你出声:\n"
                 f"{cot}"
             )
         if client_systems:
@@ -604,7 +820,7 @@ class Middleware:
     def build_messages(self, user_input: str) -> tuple[list[dict], dict]:
         """构造发往 Claude 的消息，并返回调试信息。"""
         memory = self.mcp.fetch_memory(user_input)
-        cot = self.rule_engine.reason(user_input, memory)
+        cot = self._generate_cot(user_input, memory)
         system_prompt = self._assemble_system(memory, cot)
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -616,14 +832,29 @@ class Middleware:
 
     def build_server_messages(
         self, messages: list[dict]
-    ) -> tuple[list[dict], str, str, str]:
+    ) -> tuple[list[dict], str, str, str, str]:
         """API 服务模式: 用客户端传来的对话历史构造增强后的消息。
 
-        返回 (重组消息, 末条用户文本, 记忆, 思维链)。
+        如果客户端 (例如 Operit) 在 user 消息里已经塞了 OB 记忆 attachment,
+        直接复用那份, 不再调一次 MCP, 省一次往返。
+        返回 (重组消息, 末条用户文本, 记忆, 思维链, 记忆来源 client/siwei/none)。
         """
-        user_text = _last_user_text(messages)
-        memory = self.mcp.fetch_memory(user_text) if user_text else ""
-        cot = self.rule_engine.reason(user_text, memory) if user_text else ""
+        raw_user = _last_user_raw(messages)
+        user_text = _strip_client_injections(raw_user)
+
+        # 优先: 客户端已经查过 OB, 直接拿来用; 否则 siwei 自己再查一次
+        client_mem = _extract_client_ob_memory(raw_user)
+        if client_mem:
+            memory = client_mem
+            memory_source = "client"
+        elif user_text:
+            memory = self.mcp.fetch_memory(user_text)
+            memory_source = "siwei" if memory else "none"
+        else:
+            memory = ""
+            memory_source = "none"
+
+        cot = self._generate_cot(user_text, memory) if user_text else ""
 
         client_systems = [
             _content_text(m.get("content", "")) for m in messages
@@ -632,7 +863,7 @@ class Middleware:
         system_prompt = self._assemble_system(memory, cot, client_systems)
         rebuilt: list[dict] = [{"role": "system", "content": system_prompt}]
         rebuilt.extend(m for m in messages if m.get("role") != "system")
-        return rebuilt, user_text, memory, cot
+        return rebuilt, user_text, memory, cot, memory_source
 
     def respond(self, user_input: str, stream: bool = False,
                 show_debug: bool = False) -> str:
@@ -717,8 +948,37 @@ def _server_writeback(mw: Middleware, user_text: str, reply: str) -> None:
         mw.mcp.write_memory(f"用户: {user_text}\n{mw.persona.name}: {reply}")
 
 
-def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int:
-    """以 OpenAI 兼容的 API 服务模式运行，监听 /v1/chat/completions。"""
+def _format_cot_echo(cot: str) -> str:
+    """格式化要前置到回复里的副脑分析块 (B 模式: --echo-cot 启用时使用)。"""
+    if not cot:
+        return ""
+    return f"🧠[副脑]\n{cot.strip()}\n---\n\n"
+
+
+def _make_sse_chunk(content: str, model: str) -> bytes:
+    """构造一个 OpenAI 兼容的 SSE chunk, 用于在真正 upstream 流之前先把 CoT 推出去。"""
+    payload = {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": {"role": "assistant", "content": content},
+            "finish_reason": None,
+        }],
+    }
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def serve(mw: Middleware, host: str, port: int, show_debug: bool = False,
+          echo_cot: bool = False) -> int:
+    """以 OpenAI 兼容的 API 服务模式运行，监听 /v1/chat/completions。
+
+    show_debug=True 时把每轮的记忆/CoT 全文打到 stderr (落到 .siwei.log, 适合 tail -f)。
+    echo_cot=True 时在每条返回给客户端的回复前面前置一段 🧠[副脑] 分析块, 让 Operit
+    那种没有侧栏的客户端也能直接看到思维链。
+    """
     try:
         from flask import Flask, Response, jsonify, request, stream_with_context
     except ImportError:
@@ -731,10 +991,30 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int
         body = request.get_json(force=True, silent=True) or {}
         messages = body.get("messages", []) or []
         stream = bool(body.get("stream", False))
-        rebuilt, user_text, memory, cot = mw.build_server_messages(messages)
+        rebuilt, user_text, memory, cot, mem_src = mw.build_server_messages(messages)
         if show_debug:
-            print(f"[serve] user={user_text[:40]!r} mem={'Y' if memory else 'N'} "
-                  f"cot={'Y' if cot else 'N'} stream={stream}", file=sys.stderr)
+            # 一行简短状态 (扫日志看趋势用) + 各段全文 (具体内容)
+            print(f"[serve] user_preview={user_text[:40]!r} "
+                  f"mem={mem_src} cot={'Y' if cot else 'N'} "
+                  f"stream={stream} echo={echo_cot}",
+                  file=sys.stderr)
+            # 原始请求的所有 message (含客户端的 system / Operit 自动注入的内容)
+            print("[serve][raw_messages]", file=sys.stderr)
+            for i, m in enumerate(messages):
+                role = m.get("role", "?")
+                content = _content_text(m.get("content", ""))
+                print(f"  [{i}] {role}: {content}", file=sys.stderr)
+            print(f"[serve][user_text_for_memory]\n{user_text}\n", file=sys.stderr)
+            if mem_src == "client":
+                print(f"[serve][memory <- 客户端 OB attachment, 跳过 siwei MCP 调用]\n{memory}\n",
+                      file=sys.stderr)
+            elif mem_src == "siwei":
+                print(f"[serve][memory <- siwei MCP 拉取]\n{memory}\n", file=sys.stderr)
+            else:
+                print("[serve][memory] (空, 没匹配到任何记忆)\n", file=sys.stderr)
+            if cot:
+                print(f"[serve][cot]\n{cot}\n", file=sys.stderr)
+            sys.stderr.flush()
         try:
             upstream = mw.claude.request_raw(rebuilt, stream=stream, base_payload=body)
         except requests.RequestException as e:
@@ -742,8 +1022,21 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int
                                        "type": "upstream_error"}}), 502
 
         ctype = upstream.headers.get("Content-Type", "application/json")
+        cot_prefix = _format_cot_echo(cot) if echo_cot else ""
 
         if not stream:
+            if cot_prefix and upstream.status_code < 400:
+                # 解 upstream JSON, 把 CoT 拼到 message.content 前面再返回
+                try:
+                    data = upstream.json()
+                    reply = data["choices"][0]["message"]["content"] or ""
+                    data["choices"][0]["message"]["content"] = cot_prefix + reply
+                    _server_writeback(mw, user_text, reply)
+                    body_out = json.dumps(data, ensure_ascii=False).encode("utf-8")
+                    return Response(body_out, status=upstream.status_code,
+                                    content_type="application/json")
+                except Exception:  # noqa: BLE001 - 解析失败就回退到透传
+                    pass
             content = upstream.content
             try:
                 reply = upstream.json()["choices"][0]["message"]["content"]
@@ -753,6 +1046,9 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int
             return Response(content, status=upstream.status_code, content_type=ctype)
 
         def generate():
+            if cot_prefix:
+                # 先推一个合成 chunk 把 CoT 前缀送出去, 客户端会自然拼到正文前面
+                yield _make_sse_chunk(cot_prefix, mw.claude.model)
             buf: list[bytes] = []
             for chunk in upstream.iter_content(chunk_size=None):
                 if chunk:
@@ -782,7 +1078,10 @@ def serve(mw: Middleware, host: str, port: int, show_debug: bool = False) -> int
     print(f"siwei API 服务已启动 -> http://{host}:{port}/v1/chat/completions")
     print(f"  人格={mw.persona.name}  上游模型={mw.claude.model}  "
           f"记忆={'on' if mw.mcp.enabled else 'off'}  "
-          f"写回={'on' if mw.mcp.write_enabled else 'off'}")
+          f"写回={'on' if mw.mcp.write_enabled else 'off'}  "
+          f"副脑={'DeepSeek' if mw.deepseek.enabled else '规则引擎'}  "
+          f"debug={'on' if show_debug else 'off'}  "
+          f"echo_cot={'on' if echo_cot else 'off'}")
     print(f"  把客户端(如 Operit)的 API 地址指向 http://<本机IP>:{port}/v1 即可。")
     app.run(host=host, port=port, threaded=True)
     return 0
@@ -816,6 +1115,26 @@ def check_connection(mw: Middleware) -> int:
             print(f"  {bad} {e}")
             failures += 1
 
+    deepseek = mw.deepseek
+    if not deepseek.enabled:
+        print(f"DeepSeek: \033[2m已禁用 (deepseek.enabled=false), 将使用本地规则引擎\033[0m")
+    else:
+        print(f"DeepSeek API: 连接 {deepseek._endpoint()} ...")
+        try:
+            thought = deepseek.think(
+                "ping, 请用一两句话给我一段思考示例。",
+                persona_prompt=mw.persona.build_system_prompt(),
+            )
+            if thought:
+                preview = thought.replace("\n", " ")[:80]
+                print(f"  {ok} 模型 {deepseek.model} 响应: {preview}")
+            else:
+                print(f"  {bad} 模型 {deepseek.model} 返回空 (详见上面错误)")
+                failures += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"  {bad} {e}")
+            failures += 1
+
     claude = mw.claude
     print(f"Claude API: 连接 {claude._endpoint()} ...")
     try:
@@ -840,13 +1159,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-m", "--message", help="单次提问模式 (不进入交互)")
     parser.add_argument("--no-mcp", action="store_true", help="禁用记忆拉取")
     parser.add_argument("--no-write", action="store_true", help="禁用记忆写回")
-    parser.add_argument("--no-cot", action="store_true", help="禁用本地思维链")
+    parser.add_argument("--no-cot", action="store_true", help="禁用本地规则引擎兜底")
+    parser.add_argument("--no-deepseek", action="store_true",
+                        help="禁用 DeepSeek 思维链, 直接走本地规则引擎")
     parser.add_argument("--stream", action="store_true", help="流式输出")
     parser.add_argument("--debug", action="store_true", help="打印记忆与思维链")
     parser.add_argument("--check", action="store_true",
                         help="自检: 测试 OB MCP 与 Claude API 连通性后退出")
     parser.add_argument("--serve", action="store_true",
                         help="以 OpenAI 兼容 API 服务模式运行 (/v1/chat/completions)")
+    parser.add_argument("--echo-cot", action="store_true",
+                        help="serve 模式下, 在每条回复前面注入 🧠[副脑] 分析块, 方便客户端验证思维链在跑")
     parser.add_argument("--host", default="0.0.0.0", help="服务监听地址 (默认 0.0.0.0)")
     parser.add_argument("--port", type=int, default=5001, help="服务监听端口 (默认 5001)")
     args = parser.parse_args(argv)
@@ -860,6 +1183,8 @@ def main(argv: list[str] | None = None) -> int:
         config.setdefault("mcp", {}).setdefault("write_back", {})["enabled"] = False
     if args.no_cot:
         config.setdefault("cot", {})["enabled"] = False
+    if args.no_deepseek:
+        config.setdefault("deepseek", {})["enabled"] = False
 
     mw = Middleware(config)
 
@@ -867,7 +1192,8 @@ def main(argv: list[str] | None = None) -> int:
         return check_connection(mw)
 
     if args.serve:
-        return serve(mw, args.host, args.port, show_debug=args.debug)
+        return serve(mw, args.host, args.port,
+                     show_debug=args.debug, echo_cot=args.echo_cot)
 
     if args.message:
         try:

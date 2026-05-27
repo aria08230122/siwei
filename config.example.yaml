@@ -1,6 +1,29 @@
 # 复制为 config.yaml 后填写。字符串里可用 ${ENV_VAR} 或 ${ENV_VAR:-默认值} 读取环境变量。
+#
+# 流程: 用户消息 -> DeepSeek 充当"人格的私人情感分析师"出第三人称分析
+#       -> 分析 + 用户消息 + 人格模板 -> Claude 用自己的声音和情感颗粒度出声
+# 两个模型完全独立, base_url 与 key 分开配置; 分析师不替 Claude 演人格, 只搭台。
 
-# ---- 第三方 Claude API 站点 (OpenAI 兼容格式) ----
+# ---- DeepSeek API (副脑 / 情感分析师; 官方端点或第三方贩子都行, 只要兼容 OpenAI 格式) ----
+# 实现细节: DeepSeek 收到的 system 消息 = 人格全文 (作为关系背景) + 元指令 (角色=分析师);
+#   所以它不模仿人格的语气, 只用第三人称给 Claude 出一份分析报告。
+deepseek:
+  enabled: true
+  # 官方端点: https://api.deepseek.com/v1
+  # 第三方贩子: 直接换成贩子给的 base_url 即可, 通常形如 https://xxx.com/v1
+  base_url: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}
+  api_key: ${DEEPSEEK_API_KEY}        # 建议放环境变量
+  model: ${DEEPSEEK_MODEL:-deepseek-chat}
+  max_tokens: 800
+  temperature: 0.4         # 分析师任务, 低温度更克制, 减少幻觉编造
+  timeout: 60
+  # 元指令: 拼在人格全文之后, 决定它输出怎样的思维链 (要点条数 / 风格等)。
+  # 不填则用脚本内置默认; 人格全文永远会在前面自动拼接, 不要在这里重复人格设定。
+  # system_prompt: |
+  #   ---
+  #   接下来用户会说一句话, 你只在心里想几条要点, 不要直接回复 ...
+
+# ---- 第三方 Claude API 站点 (OpenAI 兼容格式, 出正式回复) ----
 claude:
   base_url: ${CLAUDE_BASE_URL:-https://your-third-party-site/v1}
   api_key: ${CLAUDE_API_KEY}          # 建议放环境变量，不要写死在文件里
@@ -37,7 +60,7 @@ persona:
   dir: personas
   default: default
 
-# ---- 本地思维链规则引擎 (不调任何 API) ----
+# ---- 本地规则引擎 (DeepSeek 失败 / 禁用时的兜底, 不调任何 API) ----
 cot:
   enabled: true
   # 不填 rules 时使用脚本内置的默认规则。如需自定义，按下面格式覆盖:
